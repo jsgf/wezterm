@@ -20,6 +20,22 @@ pub struct SelectionRange {
     pub end: SelectionCoordinate,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub enum SelectionStyle {
+    /// Select at the character/cell level
+    Character,
+    /// Select words
+    Word,
+    /// Select lines
+    Line,
+}
+
+impl Default for SelectionStyle {
+    fn default() -> Self {
+        SelectionStyle::Character
+    }
+}
+
 impl SelectionRange {
     /// Create a new range that starts at the specified location
     pub fn start(start: SelectionCoordinate) -> Self {

@@ -144,6 +144,60 @@ impl ScreenOrAlt {
     }
 }
 
+struct SelectionState {
+    /// Where the selection started from
+    start: SelectionCoordinate,
+    /// What kind of selection we're doing
+    style: SelectionStyle,
+    /// Current range of selection
+    range: Option<SelectionRange>,
+}
+
+impl SelectionState {
+    fn new(start: SelectionCoordinate, style: SelectionStyle) -> Self {
+        SelectionState {
+            start,
+            style,
+            range: None,
+        }
+    }
+
+    fn with_range(
+        start: SelectionCoordinate,
+        range: SelectionRange,
+        style: SelectionStyle,
+    ) -> Self {
+        SelectionState {
+            start,
+            style,
+            range: Some(range),
+        }
+    }
+
+    fn start(&self) -> &SelectionCoordinate {
+        &self.start
+    }
+
+    fn style(&self) -> SelectionStyle {
+        self.style
+    }
+
+    fn set_range(&mut self, range: SelectionRange) {
+        self.range = Some(range);
+    }
+
+    fn range(&self) -> Option<&SelectionRange> {
+        self.range.as_ref()
+    }
+
+    fn map_range<F>(&mut self, func: F)
+    where
+        F: FnOnce(Option<SelectionRange>) -> SelectionRange,
+    {
+        self.range = Some(func(self.range.take()));
+    }
+}
+
 pub struct TerminalState {
     config: Arc<dyn TerminalConfiguration>,
 
@@ -203,11 +257,8 @@ pub struct TerminalState {
     /// screen with larger numbers going backwards.
     pub(crate) viewport_offset: VisibleRowIndex,
 
-    /// Remembers the starting coordinate of the selection prior to
-    /// dragging.
-    selection_start: Option<SelectionCoordinate>,
-    /// Holds the not-normalized selection range.
-    selection_range: Option<SelectionRange>,
+    /// State of the current selection, if any
+    selection: Option<SelectionState>,
 
     tabs: TabStop,
 
@@ -290,8 +341,7 @@ impl TerminalState {
             current_highlight: None,
             last_mouse_click: None,
             viewport_offset: 0,
-            selection_range: None,
-            selection_start: None,
+            selection: None,
             tabs: TabStop::new(physical_cols, 8),
             hyperlink_rules,
             hyperlink_rules_generation,
@@ -346,7 +396,12 @@ impl TerminalState {
     pub fn get_selection_text(&self) -> String {
         let mut s = String::new();
 
-        if let Some(sel) = self.selection_range.as_ref().map(|r| r.normalize()) {
+        if let Some(sel) = self
+            .selection
+            .as_ref()
+            .and_then(SelectionState::range)
+            .map(|r| r.normalize())
+        {
             let screen = self.screen();
             let mut last_was_wrapped = false;
             for y in sel.rows() {
@@ -369,7 +424,7 @@ impl TerminalState {
 
     /// Dirty the lines in the current selection range
     fn dirty_selection_lines(&mut self) {
-        if let Some(sel) = self.selection_range.as_ref().map(|r| r.normalize()) {
+        if let Some(sel) = self.selection_range() {
             let screen = self.screen_mut();
             for y in screen.scrollback_or_visible_range(&sel.rows()) {
                 screen.line_mut(y).set_dirty();
@@ -379,8 +434,7 @@ impl TerminalState {
 
     pub fn clear_selection(&mut self) {
         self.dirty_selection_lines();
-        self.selection_range = None;
-        self.selection_start = None;
+        self.selection = None;
     }
 
     /// If `cols` on the specified `row` intersect with the selection range,
@@ -393,17 +447,15 @@ impl TerminalState {
         cols: Range<usize>,
         row: ScrollbackOrVisibleRowIndex,
     ) -> bool {
-        let sel = self.selection_range.take();
-        match sel {
+        match self.selection_range() {
             Some(sel) => {
-                let sel = sel.normalize();
                 let sel_cols = sel.cols_for_row(row);
                 if intersects_range(cols, sel_cols) {
                     // Intersects, so clear the selection
                     self.clear_selection();
                     true
                 } else {
-                    self.selection_range = Some(sel);
+                    self.selection.as_mut().map(|state| *state = sel);
                     false
                 }
             }
@@ -512,20 +564,55 @@ impl TerminalState {
         }
     }
 
+    // Given a starting point and an existing range, work out what the range should be to include the
+    fn update_selection_range(
+        &mut self,
+        start: &SelectionCoordinate,
+        event: &MouseEvent,
+        style: SelectionStyle,
+    ) -> SelectionRange {
+        match style {
+            SelectionStyle::Character => {
+                let end = SelectionCoordinate {
+                    x: event.x,
+                    y: event.y as ScrollbackOrVisibleRowIndex
+                        - self.viewport_offset as ScrollbackOrVisibleRowIndex,
+                };
+                match self.selection_range.take() {
+                    None => SelectionRange::start(*start).extend(end),
+                    Some(sel) => sel.extend(end),
+                }
+            }
+            SelectionStyle::Word => unimplemented!(),
+            SelectionStyle::Line => unimplemented!(),
+        }
+    }
+
+    fn word_range(&self, event: MouseEvent) -> SelectionRange {
+        let y = event.y as ScrollbackOrVisibleRowIndex
+            - self.viewport_offset as ScrollbackOrVisibleRowIndex;
+        let idx = self.screen().scrollback_or_visible_row(y);
+
+        unimplemented!()
+    }
+
     /// Single click prepares the start of a new selection
     fn mouse_single_click_left(&mut self, event: MouseEvent) -> Result<(), Error> {
         // Prepare to start a new selection.
         // We don't form the selection until the mouse drags.
-        self.selection_range = None;
-        self.selection_start = Some(SelectionCoordinate {
-            x: event.x,
-            y: event.y as ScrollbackOrVisibleRowIndex
-                - self.viewport_offset as ScrollbackOrVisibleRowIndex,
-        });
+        self.selection = Some(SelectionState::new(
+            SelectionCoordinate {
+                x: event.x,
+                y: event.y as ScrollbackOrVisibleRowIndex
+                    - self.viewport_offset as ScrollbackOrVisibleRowIndex,
+            },
+            SelectionStyle::Character,
+        ));
         self.set_clipboard_contents(None)
     }
 
-    /// Double click to select a word on the current line
+    /// Double click to select a word on the current line, and means the selection is in terms
+    /// of words.
     fn mouse_double_click_left(&mut self, event: MouseEvent) -> Result<(), Error> {
         let y = event.y as ScrollbackOrVisibleRowIndex
             - self.viewport_offset as ScrollbackOrVisibleRowIndex;
@@ -586,8 +673,11 @@ impl TerminalState {
         // TODO: if selection_range.start.x == 0, search backwards for wrapping
         // lines too.
 
-        self.selection_start = Some(selection_range.start);
-        self.selection_range = Some(selection_range);
+        self.selection = Some(SelectionState::with_range(
+            selection_range.start,
+            selection_range,
+            SelectionStyle::Word,
+        ));
 
         self.dirty_selection_lines();
         let text = self.get_selection_text();
@@ -598,18 +688,21 @@ impl TerminalState {
         self.set_clipboard_contents(Some(text))
     }
 
-    /// triple click to select the current line
+    /// Triple click to select the current line, and make selection in terms of lines.
     fn mouse_triple_click_left(&mut self, event: MouseEvent) -> Result<(), Error> {
         let y = event.y as ScrollbackOrVisibleRowIndex
             - self.viewport_offset as ScrollbackOrVisibleRowIndex;
-        self.selection_start = Some(SelectionCoordinate { x: event.x, y });
-        self.selection_range = Some(SelectionRange {
-            start: SelectionCoordinate { x: 0, y },
-            end: SelectionCoordinate {
-                x: usize::max_value(),
-                y,
+        self.selection = Some(SelectionState::with_range(
+            SelectionCoordinate { x: event.x, y },
+            SelectionRange {
+                start: SelectionCoordinate { x: 0, y },
+                end: SelectionCoordinate {
+                    x: usize::max_value(),
+                    y,
+                },
             },
-        });
+            SelectionStyle::Line,
+        ));
         self.dirty_selection_lines();
         let text = self.get_selection_text();
         debug!(
@@ -672,7 +765,10 @@ impl TerminalState {
     }
 
     pub fn selection_range(&self) -> Option<SelectionRange> {
-        self.selection_range.map(|r| r.normalize())
+        self.selection
+            .as_ref()
+            .and_then(SelectionState::range)
+            .map(|r| r.normalize())
     }
 
     fn mouse_drag_left(&mut self, event: MouseEvent) -> Result<(), Error> {
@@ -684,11 +780,24 @@ impl TerminalState {
             y: event.y as ScrollbackOrVisibleRowIndex
                 - self.viewport_offset as ScrollbackOrVisibleRowIndex,
         };
-        let sel = match self.selection_range.take() {
-            None => SelectionRange::start(self.selection_start.unwrap_or(end)).extend(end),
-            Some(sel) => sel.extend(end),
-        };
-        self.selection_range = Some(sel);
+
+        // If we got a drag without an apparent click, then assume we're starting a character selection
+        if self.selection.is_none() {
+            self.selection = Some(SelectionState::new(end, SelectionStyle::Character));
+        }
+
+        let selection = self.selection.as_mut().unwrap();
+
+        let start = *selection.start();
+
+        selection.map_range(|range| match range {
+            None => SelectionRange::start(start).extend(end),
+            Some(range) => {
+                range.extend(end);
+                range
+            }
+        });
+
         // Dirty lines again to reflect new range
         self.dirty_selection_lines();
         Ok(())
@@ -1193,7 +1302,7 @@ impl TerminalState {
         let height = screen.physical_rows;
         let len = screen.lines.len() - self.viewport_offset as usize;
 
-        let selection = self.selection_range.map(|r| r.normalize());
+        let selection = self.selection_range();
 
         for (i, line) in screen.lines.iter().skip(len - height).enumerate() {
             if i >= height {

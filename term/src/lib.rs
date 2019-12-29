@@ -19,7 +19,7 @@ pub mod screen;
 pub use crate::screen::*;
 
 pub mod selection;
-use crate::selection::{SelectionCoordinate, SelectionRange};
+use crate::selection::{SelectionCoordinate, SelectionRange, SelectionStyle};
 
 use termwiz::hyperlink::Hyperlink;
 
