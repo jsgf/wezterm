@@ -610,7 +610,7 @@ impl<S: ReadAndWrite> ClientSession<S> {
                 self.stream.as_poll_fd(),
                 self.mux_rx.as_poll_fd(),
             ];
-            poll_for_read(&mut poll_array);
+            poll_for_read(&mut poll_array, None);
 
             if poll_array[1].revents != 0 || self.stream.has_read_buffered() {
                 loop {

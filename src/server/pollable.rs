@@ -6,11 +6,15 @@ use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub trait ReadAndWrite: std::io::Read + std::io::Write + Send + AsPollFd {
     fn set_non_blocking(&self, non_blocking: bool) -> anyhow::Result<()>;
     fn has_read_buffered(&self) -> bool;
+    fn timeout(&self) -> Option<Duration> { None }
+    fn on_timeout(&self) {}
 }
+
 impl ReadAndWrite for UnixStream {
     fn set_non_blocking(&self, non_blocking: bool) -> anyhow::Result<()> {
         self.set_nonblocking(non_blocking)?;
@@ -147,8 +151,8 @@ impl AsPollFd for UnixStream {
     }
 }
 
-pub fn poll_for_read(pfd: &mut [pollfd]) {
-    if let Err(e) = poll(pfd, None) {
+pub fn poll_for_read(pfd: &mut [pollfd], timeout: Option<Duration>) {
+    if let Err(e) = poll(pfd, timeout) {
         log::error!("poll failed for {}", e);
     }
 }

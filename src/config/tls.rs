@@ -1,5 +1,17 @@
 use crate::config::*;
 
+#[derive(Debug, Clone, Deserialize)]
+pub enum TlsTransport {
+    Tcp,
+    Quic,
+}
+
+impl Default for TlsTransport {
+    fn default() -> Self {
+        TlsTransport::Tcp
+    }
+}
+
 #[derive(Default, Debug, Clone, Deserialize)]
 pub struct TlsDomainServer {
     /// The address:port combination on which the server will listen
@@ -22,6 +34,10 @@ pub struct TlsDomainServer {
     /// to the trust store.
     #[serde(default)]
     pub pem_root_certs: Vec<PathBuf>,
+
+    /// Define the transport for the connection
+    #[serde(default)]
+    pub transport: TlsTransport,
 }
 
 #[derive(Default, Debug, Clone, Deserialize)]
@@ -67,4 +83,8 @@ pub struct TlsDomainClient {
     /// If true, connect to this domain automatically at startup
     #[serde(default)]
     pub connect_automatically: bool,
+
+    /// Define the transport for the connection
+    #[serde(default)]
+    pub transport: TlsTransport,
 }

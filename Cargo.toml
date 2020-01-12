@@ -46,6 +46,7 @@ notify = "4.0"
 palette = "0.5"
 portable-pty = { path = "pty", features = ["serde_support", "ssh"]}
 promise = { path = "promise" }
+quiche = { version = "0.2", optional = true }
 ratelimit_meter = "5.0"
 serde = {version="1.0", features = ["rc", "derive"]}
 serial = "0.4"
@@ -64,6 +65,9 @@ varbincode = "0.1"
 walkdir = "2"
 window = { path = "window", features=["opengl", "wayland"]}
 zstd = "0.4"
+
+[features]
+quic = [ "quiche" ]
 
 [target.'cfg(unix)'.dependencies]
 daemonize = { git = "https://github.com/wez/daemonize" }

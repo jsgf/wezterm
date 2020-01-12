@@ -139,7 +139,7 @@ fn client_thread(
         }
 
         let mut poll_array = [rx.as_poll_fd(), reconnectable.stream().as_poll_fd()];
-        poll_for_read(&mut poll_array);
+        poll_for_read(&mut poll_array, None);
 
         if poll_array[1].revents != 0 || reconnectable.stream().has_read_buffered() {
             // When TLS is enabled on a stream, it may require a mixture of
