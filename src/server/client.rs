@@ -422,13 +422,13 @@ impl Reconnectable {
 
         let mut connector = SslConnector::builder(SslMethod::tls())?;
 
-        if let Some(cert_file) = tls_client.pem_cert.as_ref() {
+        if let Some(cert_file) = tls_client.certs.pem_cert.as_ref() {
             connector.set_certificate_file(cert_file, SslFiletype::PEM)?;
         }
-        if let Some(chain_file) = tls_client.pem_ca.as_ref() {
+        if let Some(chain_file) = tls_client.certs.pem_ca.as_ref() {
             connector.set_certificate_chain_file(chain_file)?;
         }
-        if let Some(key_file) = tls_client.pem_private_key.as_ref() {
+        if let Some(key_file) = tls_client.certs.pem_private_key.as_ref() {
             connector.set_private_key_file(key_file, SslFiletype::PEM)?;
         }
         fn load_cert(name: &Path) -> anyhow::Result<X509> {
@@ -436,7 +436,7 @@ impl Reconnectable {
             log::trace!("loaded {}", name.display());
             Ok(X509::from_pem(&cert_bytes)?)
         }
-        for name in &tls_client.pem_root_certs {
+        for name in &tls_client.certs.pem_root_certs {
             if name.is_dir() {
                 for entry in std::fs::read_dir(name)? {
                     if let Ok(cert) = load_cert(&entry?.path()) {
@@ -451,7 +451,7 @@ impl Reconnectable {
         let connector = connector.build();
         let connector = connector
             .configure()?
-            .verify_hostname(!tls_client.accept_invalid_hostnames);
+            .verify_hostname(!tls_client.certs.accept_invalid_hostnames);
 
         let stream = TcpStream::connect(remote_address)
             .with_context(|| format!("connecting to {}", remote_address))?;
@@ -461,6 +461,7 @@ impl Reconnectable {
             connector
                 .connect(
                     tls_client
+                        .certs
                         .expected_cn
                         .as_ref()
                         .map(String::as_str)

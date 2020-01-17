@@ -325,13 +325,13 @@ mod ossl {
 
         let mut acceptor = SslAcceptor::mozilla_modern(SslMethod::tls())?;
 
-        if let Some(cert_file) = tls_server.pem_cert.as_ref() {
+        if let Some(cert_file) = tls_server.certs.pem_cert.as_ref() {
             acceptor.set_certificate_file(cert_file, SslFiletype::PEM)?;
         }
-        if let Some(chain_file) = tls_server.pem_ca.as_ref() {
+        if let Some(chain_file) = tls_server.certs.pem_ca.as_ref() {
             acceptor.set_certificate_chain_file(chain_file)?;
         }
-        if let Some(key_file) = tls_server.pem_private_key.as_ref() {
+        if let Some(key_file) = tls_server.certs.pem_private_key.as_ref() {
             acceptor.set_private_key_file(key_file, SslFiletype::PEM)?;
         }
         fn load_cert(name: &Path) -> anyhow::Result<X509> {
@@ -339,7 +339,7 @@ mod ossl {
             log::trace!("loaded {}", name.display());
             Ok(X509::from_pem(&cert_bytes)?)
         }
-        for name in &tls_server.pem_root_certs {
+        for name in &tls_server.certs.pem_root_certs {
             if name.is_dir() {
                 for entry in std::fs::read_dir(name)? {
                     if let Ok(cert) = load_cert(&entry?.path()) {
