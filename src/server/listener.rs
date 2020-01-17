@@ -1,4 +1,4 @@
-use crate::config::{configuration, TlsDomainServer, UnixDomain};
+use crate::config::{configuration, QuicDomainServer, TlsDomainServer, UnixDomain};
 use crate::create_user_owned_dirs;
 use crate::mux::renderable::{RenderableDimensions, StableCursorPosition};
 use crate::mux::tab::{Tab, TabId};
@@ -778,6 +778,16 @@ fn spawn_tls_listener(tls_server: &TlsDomainServer) -> anyhow::Result<()> {
     not_ossl::spawn_tls_listener(tls_server)
 }
 
+#[cfg(feature = "quic")]
+fn spawn_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()> {
+    quic::spawn_quic_listener(quic_server)
+}
+
+#[cfg(not(feature = "quic"))]
+fn spawn_quic_listener(_quic_server: &QuicDomainServer) -> anyhow::Result<()> {
+    Ok(())
+}
+
 pub fn spawn_listener() -> anyhow::Result<()> {
     let config = configuration();
     for unix_dom in &config.unix_domains {
@@ -790,5 +800,10 @@ pub fn spawn_listener() -> anyhow::Result<()> {
     for tls_server in &config.tls_servers {
         spawn_tls_listener(tls_server)?;
     }
+
+    for quic_server in &config.quic_servers {
+        spawn_quic_listener(quic_server)?;
+    }
+
     Ok(())
 }

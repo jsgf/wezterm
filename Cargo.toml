@@ -67,6 +67,7 @@ window = { path = "window", features=["opengl", "wayland"]}
 zstd = "0.4"
 
 [features]
+default = ["quic"]
 quic = [ "quiche" ]
 
 [target.'cfg(unix)'.dependencies]
