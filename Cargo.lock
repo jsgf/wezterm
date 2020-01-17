@@ -3266,7 +3266,7 @@ dependencies = [
  "bumpalo",
  "lazy_static",
  "log",
- "proc-macro2 1.0.7",
+ "proc-macro2 1.0.8",
  "quote 1.0.2",
  "syn 1.0.13",
  "wasm-bindgen-shared",
@@ -3288,7 +3288,7 @@ version = "0.2.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e85031354f25eaebe78bb7db1c3d86140312a911a106b2e29f9cc440ce3e7668"
 dependencies = [
- "proc-macro2 1.0.7",
+ "proc-macro2 1.0.8",
  "quote 1.0.2",
  "syn 1.0.13",
  "wasm-bindgen-backend",
@@ -3310,7 +3310,7 @@ dependencies = [
  "anyhow",
  "heck",
  "log",
- "proc-macro2 1.0.7",
+ "proc-macro2 1.0.8",
  "quote 1.0.2",
  "syn 1.0.13",
  "wasm-bindgen-backend",
