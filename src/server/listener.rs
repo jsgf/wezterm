@@ -1,23 +1,19 @@
-use crate::config::{configuration, QuicDomainServer, TlsDomainServer, UnixDomain};
-use crate::create_user_owned_dirs;
+
+use crate::config::{configuration, QuicDomainServer, TlsDomainServer};
 use crate::mux::renderable::{RenderableDimensions, StableCursorPosition};
 use crate::mux::tab::{Tab, TabId};
 use crate::mux::{Mux, MuxNotification, MuxSubscriber};
 use crate::server::codec::*;
 use crate::server::pollable::*;
-use crate::server::UnixListener;
 use anyhow::{anyhow, bail, Context, Error};
 use crossbeam_channel::TryRecvError;
-#[cfg(unix)]
-use libc::{mode_t, umask};
-use log::{debug, error};
+use log::error;
 use native_tls::Identity;
 use portable_pty::PtySize;
 use promise::spawn::spawn_into_main_thread;
 use rangeset::RangeSet;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
-use std::fs::remove_file;
 use std::io::Read;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -29,6 +25,8 @@ use term::terminal::Clipboard;
 use term::StableRowIndex;
 use url::Url;
 
+mod local;
+
 #[cfg(any(feature = "openssl", unix))]
 mod ossl;
 
@@ -37,33 +35,6 @@ mod not_ossl;
 
 #[cfg(feature = "quic")]
 mod quic;
-
-struct LocalListener {
-    listener: UnixListener,
-}
-
-impl LocalListener {
-    pub fn new(listener: UnixListener) -> Self {
-        Self { listener }
-    }
-
-    fn run(&mut self) {
-        for stream in self.listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    spawn_into_main_thread(async move {
-                        let mut session = ClientSession::new(stream);
-                        thread::spawn(move || session.run());
-                    });
-                }
-                Err(err) => {
-                    error!("accept failed: {}", err);
-                    return;
-                }
-            }
-        }
-    }
-}
 
 #[derive(Debug)]
 pub enum IdentitySource {
@@ -694,80 +665,6 @@ async fn domain_spawn(spawn: Spawn, sender: PollableSender<DecodedPdu>) -> anyho
     }))
 }
 
-/// Unfortunately, novice unix users can sometimes be running
-/// with an overly permissive umask so we take care to install
-/// a more restrictive mask while we might be creating things
-/// in the filesystem.
-/// This struct locks down the umask for its lifetime, restoring
-/// the prior umask when it is dropped.
-struct UmaskSaver {
-    #[cfg(unix)]
-    mask: mode_t,
-}
-
-impl UmaskSaver {
-    fn new() -> Self {
-        Self {
-            #[cfg(unix)]
-            mask: unsafe { umask(0o077) },
-        }
-    }
-}
-
-impl Drop for UmaskSaver {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        unsafe {
-            umask(self.mask);
-        }
-    }
-}
-
-/// Take care when setting up the listener socket;
-/// we need to be sure that the directory that we create it in
-/// is owned by the user and has appropriate file permissions
-/// that prevent other users from manipulating its contents.
-fn safely_create_sock_path(unix_dom: &UnixDomain) -> Result<UnixListener, Error> {
-    let sock_path = &unix_dom.socket_path();
-    debug!("setting up {}", sock_path.display());
-
-    let _saver = UmaskSaver::new();
-
-    let sock_dir = sock_path
-        .parent()
-        .ok_or_else(|| anyhow!("sock_path {} has no parent dir", sock_path.display()))?;
-
-    create_user_owned_dirs(sock_dir)?;
-
-    #[cfg(unix)]
-    {
-        use crate::running_under_wsl;
-        use std::os::unix::fs::PermissionsExt;
-
-        if !running_under_wsl() && !unix_dom.skip_permissions_check {
-            // Let's be sure that the ownership looks sane
-            let meta = sock_dir.symlink_metadata()?;
-
-            let permissions = meta.permissions();
-            if (permissions.mode() & 0o22) != 0 {
-                bail!(
-                    "The permissions for {} are insecure and currently \
-                     allow other users to write to it (permissions={:?})",
-                    sock_dir.display(),
-                    permissions
-                );
-            }
-        }
-    }
-
-    if sock_path.exists() {
-        remove_file(sock_path)?;
-    }
-
-    UnixListener::bind(sock_path)
-        .with_context(|| format!("Failed to bind to {}", sock_path.display()))
-}
-
 #[cfg(any(feature = "openssl", unix))]
 fn spawn_tls_listener(tls_server: &TlsDomainServer) -> anyhow::Result<()> {
     ossl::spawn_tls_listener(tls_server)
@@ -791,10 +688,7 @@ fn spawn_quic_listener(_quic_server: &QuicDomainServer) -> anyhow::Result<()> {
 pub fn spawn_listener() -> anyhow::Result<()> {
     let config = configuration();
     for unix_dom in &config.unix_domains {
-        let mut listener = LocalListener::new(safely_create_sock_path(unix_dom)?);
-        thread::spawn(move || {
-            listener.run();
-        });
+        local::spawn_local_listener(unix_dom)?;
     }
 
     for tls_server in &config.tls_servers {
