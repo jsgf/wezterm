@@ -2,10 +2,29 @@ use super::*;
 use crate::config::QuicDomainServer;
 use crate::server::pollable::{AsPollFd, ReadAndWrite};
 use filedescriptor::*;
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
+use std::net;
 use std::time::Duration;
 
-pub struct Quic {}
+struct PartialResponse {
+    body: Vec<u8>,
+
+    written: usize,
+}
+
+struct Client {
+    conn: std::pin::Pin<Box<quiche::Connection>>,
+
+    partial_responses: HashMap<u64, PartialResponse>,
+}
+
+type ClientMap = HashMap<Vec<u8>, (net::SocketAddr, Client)>;
+
+pub struct Quic {
+    clients: ClientMap,
+    socket: net::UdpSocket,
+}
 
 impl Read for Quic {
     fn read(&mut self, _buf: &mut [u8]) -> Result<usize, io::Error> {
@@ -47,6 +66,32 @@ impl ReadAndWrite for Quic {
     }
 }
 
-pub fn spawn_quic_listener(_quic_server: &QuicDomainServer) -> Result<(), Error> {
-    unimplemented!()
+fn quic_listener(config: quiche::Config, socket: net::UdpSocket) {
+    todo!()
+}
+
+pub fn spawn_quic_listener(quic_server: &QuicDomainServer) -> Result<(), Error> {
+    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+
+    if let Some(pem_cert) = &quic_server.certs.pem_cert {
+        config.load_cert_chain_from_pem_file(pem_cert.to_str().unwrap())?;
+    }
+    if let Some(pem_priv) = &quic_server.certs.pem_private_key {
+        config.load_priv_key_from_pem_file(pem_priv.to_str().unwrap())?;
+    }
+    if let Some(cc_algorithm) = &quic_server.cc_algorithm {
+        config.set_cc_algorithm_name(cc_algorithm)?;
+    }
+    if std::env::var_os("SSLKEYLOGFILE").is_some() {
+        config.log_keys();
+    }
+
+    config.set_application_protos(b"\x07wezterm")?;
+
+    let socket =
+        net::UdpSocket::bind(&quic_server.bind_address).context("Failed to bind Quic socket")?;
+
+    thread::spawn(|| quic_listener(config, socket));
+
+    Ok(())
 }

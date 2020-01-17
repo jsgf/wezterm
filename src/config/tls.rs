@@ -87,6 +87,9 @@ pub struct QuicDomainServer {
     /// for client connections
     pub bind_address: String,
 
+    /// Congestion control algorithm
+    pub cc_algorithm: Option<String>,
+
     #[serde(flatten)]
     pub certs: TlsServerCerts,
 }
