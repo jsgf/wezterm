@@ -47,6 +47,17 @@ impl ReadAndWrite for Quic {
     }
 }
 
-pub fn spawn_quic_listener(_quic_server: &QuicDomainServer) -> Result<(), Error> {
+pub fn spawn_quic_listener(quic_server: &QuicDomainServer) -> Result<(), Error> {
+    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+
+    if let Some(pem_cert) = &quic_server.certs.pem_cert {
+        config.load_cert_chain_from_pem_file(pem_cert.to_str().unwrap())?;
+    }
+    if let Some(pem_priv) = &quic_server.certs.pem_private_key {
+        config.load_priv_key_from_pem_file(pem_priv.to_str().unwrap())?;
+    }
+
+    config.set_application_protos(b"\x07wezterm")?;
+
     unimplemented!()
 }
