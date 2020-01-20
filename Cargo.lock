@@ -2145,13 +2145,13 @@ dependencies = [
 [[package]]
 name = "quiche"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc91861bdc8f8f8ee582b181dbb55fe2aee635bbdde8655df4209547d14cf921"
+source = "git+https://github.com/jsgf/quiche.git?rev=8aa959721f1f2ddd6003257c7bc7c70f846127f1#8aa959721f1f2ddd6003257c7bc7c70f846127f1"
 dependencies = [
  "cmake",
  "lazy_static",
  "libc",
  "log",
+ "pkg-config",
  "ring",
  "winapi 0.3.8",
 ]
