@@ -51,8 +51,8 @@ pub fn spawn_tls_listener(tls_server: &TlsDomainServer) -> anyhow::Result<()> {
             .as_ref()
             .ok_or_else(|| anyhow!("missing pem_private_key config value"))?
             .into(),
-        cert: tls_server.pem_cert.clone(),
-        chain: tls_server.pem_ca.clone(),
+        cert: tls_server.certs.pem_cert.clone(),
+        chain: tls_server.certs.pem_ca.clone(),
     };
 
     let mut net_listener = NetListener::new(

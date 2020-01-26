@@ -1,11 +1,7 @@
 use crate::config::*;
 
 #[derive(Default, Debug, Clone, Deserialize)]
-pub struct TlsDomainServer {
-    /// The address:port combination on which the server will listen
-    /// for client connections
-    pub bind_address: String,
-
+pub struct TlsServerCerts {
     /// the path to an x509 PEM encoded private key file
     pub pem_private_key: Option<PathBuf>,
 
@@ -25,14 +21,7 @@ pub struct TlsDomainServer {
 }
 
 #[derive(Default, Debug, Clone, Deserialize)]
-pub struct TlsDomainClient {
-    /// The name of this specific domain.  Must be unique amongst
-    /// all types of domain in the configuration file.
-    pub name: String,
-
-    /// identifies the host:port pair of the remote server.
-    pub remote_address: String,
-
+pub struct TlsClientCerts {
     /// the path to an x509 PEM encoded private key file
     pub pem_private_key: Option<PathBuf>,
 
@@ -63,6 +52,29 @@ pub struct TlsDomainClient {
     /// the hostname portion of the `remote_address` configuration and you
     /// should not normally need to override this value.
     pub expected_cn: Option<String>,
+}
+
+#[derive(Default, Debug, Clone, Deserialize)]
+pub struct TlsDomainServer {
+    /// The address:port combination on which the server will listen
+    /// for client connections
+    pub bind_address: String,
+
+    #[serde(flatten)]
+    pub certs: TlsServerCerts,
+}
+
+#[derive(Default, Debug, Clone, Deserialize)]
+pub struct TlsDomainClient {
+    /// The name of this specific domain.  Must be unique amongst
+    /// all types of domain in the configuration file.
+    pub name: String,
+
+    /// identifies the host:port pair of the remote server.
+    pub remote_address: String,
+
+    #[serde(flatten)]
+    pub certs: TlsClientCerts,
 
     /// If true, connect to this domain automatically at startup
     #[serde(default)]

@@ -25,6 +25,8 @@ mod server;
 mod ssh;
 mod stats;
 mod termwiztermtab;
+#[cfg(feature = "quic")]
+mod quic;
 
 use crate::frontend::activity::Activity;
 use crate::frontend::{front_end, FrontEndSelection};
