@@ -62,5 +62,13 @@ pub fn spawn_listener() -> anyhow::Result<()> {
     for tls_server in &config.tls_servers {
         tls_impl::spawn_tls_listener(tls_server)?;
     }
+
+    #[cfg(feature = "quic")]
+    {
+        for quic_server in &config.quic_servers {
+            quic::spawn_quic_listener(quic_server)?;
+        }
+    }
+
     Ok(())
 }

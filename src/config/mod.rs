@@ -369,6 +369,9 @@ pub struct Config {
     #[serde(default)]
     pub tls_servers: Vec<TlsDomainServer>,
 
+    #[serde(default)]
+    pub quic_servers: Vec<QuicDomainServer>,
+
     /// The set of tls domains that we can connect to as a client
     #[serde(default)]
     pub tls_clients: Vec<TlsDomainClient>,

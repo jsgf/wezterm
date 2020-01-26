@@ -80,3 +80,30 @@ pub struct TlsDomainClient {
     #[serde(default)]
     pub connect_automatically: bool,
 }
+
+#[derive(Default, Debug, Clone, Deserialize)]
+pub struct QuicDomainServer {
+    /// The address:port combination on which the server will listen
+    /// for client connections
+    pub bind_address: String,
+
+    #[serde(flatten)]
+    pub certs: TlsServerCerts,
+}
+
+#[derive(Default, Debug, Clone, Deserialize)]
+pub struct QuicDomainClient {
+    /// The name of this specific domain.  Must be unique amongst
+    /// all types of domain in the configuration file.
+    pub name: String,
+
+    /// identifies the host:port pair of the remote server.
+    pub remote_address: String,
+
+    #[serde(flatten)]
+    pub certs: TlsClientCerts,
+
+    /// If true, connect to this domain automatically at startup
+    #[serde(default)]
+    pub connect_automatically: bool,
+}
