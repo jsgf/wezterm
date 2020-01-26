@@ -17,7 +17,7 @@ use term::terminal::Clipboard;
 use term::StableRowIndex;
 use url::Url;
 
-pub struct ClientSession<S: ReadAndWrite> {
+pub struct ClientSession<S> {
     stream: S,
     to_write_rx: PollableReceiver<DecodedPdu>,
     to_write_tx: PollableSender<DecodedPdu>,
