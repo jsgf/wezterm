@@ -441,7 +441,7 @@ macro_rules! pdu {
 /// The overall version of the codec.
 /// This must be bumped when backwards incompatible changes
 /// are made to the types and protocol.
-pub const CODEC_VERSION: usize = 45;
+pub const CODEC_VERSION: usize = 46;
 
 // Defines the Pdu enum.
 // Each struct has an explicit identifying number.
@@ -502,6 +502,8 @@ pdu! {
     GetPaneDirection: 60,
     GetPaneDirectionResponse: 61,
     AdjustPaneSize: 62,
+    GetQuicCreds: 63,
+    GetQuicCredsResponse: 64,
 }
 
 impl Pdu {
@@ -632,6 +634,20 @@ pub struct GetTlsCreds {}
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
 pub struct GetTlsCredsResponse {
+    /// The signing certificate
+    pub ca_cert_pem: String,
+    /// A client authentication certificate and private
+    /// key, PEM encoded
+    pub client_cert_pem: String,
+}
+
+/// Request credentials for QUIC connections
+/// the QUIC based server
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct GetQuicCreds {}
+
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct GetQuicCredsResponse {
     /// The signing certificate
     pub ca_cert_pem: String,
     /// A client authentication certificate and private
