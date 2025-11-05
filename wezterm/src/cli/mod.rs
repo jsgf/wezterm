@@ -21,6 +21,7 @@ mod set_window_title;
 mod spawn_command;
 mod split_pane;
 mod tls_creds;
+mod quic_creds;
 mod zoom_pane;
 
 #[derive(Debug, Parser, Clone, Copy)]
@@ -86,6 +87,9 @@ enum CliSubCommand {
 
     #[command(name = "tlscreds", about = "obtain tls credentials")]
     TlsCreds(tls_creds::TlsCredsCommand),
+
+    #[command(name = "quiccreds", about = "obtain quic credentials")]
+    QuicCreds(quic_creds::QuicCredsCommand),
 
     #[command(
         name = "move-pane-to-new-tab",
@@ -189,6 +193,7 @@ async fn run_cli_async(opts: &crate::Opt, cli: CliCommand) -> anyhow::Result<()>
         CliSubCommand::SpawnCommand(cmd) => cmd.run(client, &crate::init_config(opts)?).await,
         CliSubCommand::Proxy(cmd) => cmd.run(client, &crate::init_config(opts)?).await,
         CliSubCommand::TlsCreds(cmd) => cmd.run(client).await,
+        CliSubCommand::QuicCreds(cmd) => cmd.run(client).await,
         CliSubCommand::ActivatePaneDirection(cmd) => cmd.run(client).await,
         CliSubCommand::GetPaneDirection(cmd) => cmd.run(client).await,
         CliSubCommand::KillPane(cmd) => cmd.run(client).await,

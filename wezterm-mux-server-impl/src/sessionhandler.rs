@@ -879,6 +879,19 @@ impl SessionHandler {
                     send_response,
                 );
             }
+            Pdu::GetQuicCreds(_) => {
+                catch(
+                    move || {
+                        let client_cert_pem = PKI.generate_client_cert()?;
+                        let ca_cert_pem = PKI.ca_pem_string()?;
+                        Ok(Pdu::GetQuicCredsResponse(GetQuicCredsResponse {
+                            client_cert_pem,
+                            ca_cert_pem,
+                        }))
+                    },
+                    send_response,
+                );
+            }
             Pdu::WindowTitleChanged(WindowTitleChanged { window_id, title }) => {
                 spawn_into_main_thread(async move {
                     catch(
@@ -987,8 +1000,6 @@ impl SessionHandler {
                 .detach();
             }
 
-            Pdu::GetQuicCreds { .. } => unreachable!("unimplemented"),
-
             Pdu::Invalid { .. } => send_response(Err(anyhow!("invalid PDU {:?}", decoded.pdu))),
             Pdu::Pong { .. }
             | Pdu::ListPanesResponse { .. }
@@ -1004,6 +1015,7 @@ impl SessionHandler {
             | Pdu::GetCodecVersionResponse { .. }
             | Pdu::WindowWorkspaceChanged { .. }
             | Pdu::GetTlsCredsResponse { .. }
+            | Pdu::GetQuicCredsResponse { .. }
             | Pdu::GetClientListResponse { .. }
             | Pdu::PaneRemoved { .. }
             | Pdu::PaneFocused { .. }
@@ -1012,7 +1024,6 @@ impl SessionHandler {
             | Pdu::MovePaneToNewTabResponse { .. }
             | Pdu::TabAddedToWindow { .. }
             | Pdu::GetPaneRenderableDimensionsResponse { .. }
-            | Pdu::GetQuicCredsResponse { .. }
             | Pdu::ErrorResponse { .. } => {
                 send_response(Err(anyhow!("expected a request, got {:?}", decoded.pdu)))
             }
