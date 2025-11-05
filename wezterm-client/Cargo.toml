@@ -40,6 +40,11 @@ wezterm-term = { workspace=true, features=["use_serde"] }
 wezterm-uds.workspace = true
 quinn = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+quinn-proto = { workspace = true, optional = true }
+
+[features]
+quic = ["quinn", "rustls", "webpki-roots", "quinn-proto"]
 
 [target."cfg(windows)".dependencies]
 winapi = { workspace=true, features = [

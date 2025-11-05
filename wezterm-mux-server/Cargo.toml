@@ -26,6 +26,11 @@ wezterm-blob-leases = {workspace=true, features=["simple_tempdir"]}
 wezterm-mux-server-impl.workspace = true
 wezterm-gui-subcommands.workspace = true
 wezterm-term.workspace = true
+quinn = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+
+[features]
+quic = ["quinn", "rustls"]
 
 [target."cfg(windows)".dependencies]
 winapi = { workspace=true, features = [ "winuser" ]}

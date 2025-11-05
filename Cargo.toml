@@ -176,7 +176,8 @@ procinfo = { path = "procinfo" }
 procinfo-funcs = { path = "lua-api-crates/procinfo-funcs" }
 promise = { path = "promise" }
 quote = "1.0.2"
-quinn = { version = "0.11", default-features = false }
+quinn = { version = "0.11", default-features = false, features = ["runtime-smol", "rustls"] }
+quinn-proto = { version = "0.11", default-features = false, features = ["rustls", "ring"] }
 rangeset = { path = "rangeset" }
 ratelim= { path = "ratelim" }
 raw-window-handle = "0.6"
@@ -189,6 +190,7 @@ resize = "0.5"
 rstest = "0.21"
 rusqlite = "0.32"
 rustls = { version = "0.23", features = ["std", "ring"] }
+webpki-roots = "0.26"
 serde = {version="1.0", default-features=false, features = ["derive"]}
 serde-funcs = { path = "lua-api-crates/serde-funcs" }
 serde_json = "1.0"

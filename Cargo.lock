@@ -6943,6 +6943,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.4",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2878ef029c47c6e8cf779119f20fcf52bde7ad42a731b2a304bc221df17571e"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "weezl"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7062,14 +7080,18 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "promise",
+ "quinn",
+ "quinn-proto",
  "rangeset",
  "ratelim",
+ "rustls",
  "smol",
  "termwiz",
  "textwrap",
  "thiserror 1.0.69",
  "umask",
  "url",
+ "webpki-roots 0.26.11",
  "wezterm-dynamic",
  "wezterm-ssh",
  "wezterm-term",
@@ -7309,6 +7331,8 @@ dependencies = [
  "openssl",
  "portable-pty",
  "promise",
+ "quinn",
+ "rustls",
  "umask",
  "wezterm-blob-leases",
  "wezterm-gui-subcommands",

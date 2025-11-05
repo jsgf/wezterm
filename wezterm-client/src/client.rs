@@ -1040,14 +1040,105 @@ impl Reconnectable {
 
     pub fn quic_connect(
         &mut self,
-        _quic_client: config::QuicDomainClient,
+        quic_client: config::QuicDomainClient,
         _initial: bool,
         ui: &mut ConnectionUI,
     ) -> anyhow::Result<()> {
         #[cfg(feature = "quic")]
         {
-            ui.output_str("QUIC transport not yet fully implemented\n");
-            bail!("QUIC transport not yet fully implemented");
+            use crate::quic_client;
+
+            let remote_address = &quic_client.remote_address;
+
+            // Try to connect directly with cached certificates if available
+            if quic_client.ssh_parameters().is_some() {
+                match block_on(quic_client::establish_quic_connection(&remote_address, None, None)) {
+                    Ok(stream) => {
+                        self.stream.replace(stream);
+                        ui.output_str(&format!("QUIC Connected to {}!\n", remote_address));
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        log::debug!("Direct QUIC connect failed, will try SSH bootstrap: {}", err);
+                    }
+                }
+            }
+
+            // SSH bootstrap for certificate exchange
+            if let Some(Ok(ssh_params)) = quic_client.ssh_parameters() {
+                ui.output_str("Bootstrapping QUIC credentials via SSH...\n");
+
+                let mut ssh_config = wezterm_ssh::Config::new();
+                ssh_config.add_default_config_files();
+
+                let mut fields = ssh_params.host_and_port.split(':');
+                let host = fields
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("no host component somehow"))?;
+                let port = fields.next();
+
+                let mut ssh_config = ssh_config.for_host(host);
+                if let Some(username) = &ssh_params.username {
+                    ssh_config.insert("user".to_string(), username.to_string());
+                }
+                if let Some(port) = port {
+                    ssh_config.insert("port".to_string(), port.to_string());
+                }
+
+                let sess = ssh_connect_with_ui(ssh_config, ui)?;
+
+                // Execute quiccreds command to get certificates
+                let creds = ui.run_and_log_error(|| {
+                    let cmd = format!(
+                        "{} cli quiccreds",
+                        Self::wezterm_bin_path(&quic_client.remote_wezterm_path)
+                    );
+
+                    ui.output_str(&format!("Running: {}\n", cmd));
+                    let mut exec = smol::block_on(sess.exec(&cmd, None))
+                        .with_context(|| format!("executing `{}` on remote host", cmd))?;
+
+                    let status = exec.child.wait()?;
+                    if !status.success() {
+                        anyhow::bail!("{} failed", cmd);
+                    }
+
+                    drop(exec.stdin);
+
+                    let mut stderr = exec.stderr;
+                    thread::spawn(move || {
+                        let mut err = String::new();
+                        let _ = stderr.read_to_string(&mut err);
+                        if !err.is_empty() {
+                            log::error!("remote: `{}` stderr -> `{}`", cmd, err);
+                        }
+                    });
+
+                    let creds = match Pdu::decode(exec.stdout)
+                        .context("reading quiccreds response")?
+                        .pdu
+                    {
+                        Pdu::GetQuicCredsResponse(creds) => creds,
+                        _ => bail!("unexpected response to quiccreds"),
+                    };
+
+                    log::info!("got QUIC creds");
+                    Ok(creds)
+                })?;
+
+                // Now connect with the obtained credentials
+                let stream = block_on(quic_client::establish_quic_connection(
+                    &remote_address,
+                    Some(creds.client_cert_pem),
+                    Some(creds.ca_cert_pem),
+                ))?;
+
+                self.stream.replace(stream);
+                ui.output_str(&format!("QUIC Connected to {}!\n", remote_address));
+                Ok(())
+            } else {
+                bail!("No SSH bootstrap configured for QUIC domain");
+            }
         }
         #[cfg(not(feature = "quic"))]
         {

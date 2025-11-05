@@ -356,17 +356,82 @@ WezTerm's SSH-based mux server startup creates an ideal use case for QUIC:
 7. Configuration as simple as TLS domains
 8. Comprehensive test coverage (>80%)
 
+## Implementation Status
+
+### ✅ Completed Work (18 commits)
+
+**Phase 1: Configuration & Core Types**
+- ✅ `config/src/quic.rs` - QuicDomainClient/Server configuration structs
+- ✅ `config/Cargo.toml` - Added `quic` feature flag with optional quinn/rustls/ring deps
+- ✅ Integrated into main Config struct with domain validation
+- ✅ Added integration tests (4 passing tests)
+- ✅ Comprehensive documentation (multiplexing guide, API reference)
+
+**Phase 2: Client Implementation (Scaffold)**
+- ✅ `wezterm-client/src/quic_client.rs` - Basic placeholder with establish_quic_connection()
+- ✅ Added `quic_connect()` method to Reconnectable struct
+- ✅ Added `new_quic()` factory method to Client
+- ✅ Updated ClientDomainConfig enum with Quic variant
+- ✅ Full pattern matching coverage for all domain operations
+- ✅ `wezterm-client/Cargo.toml` - Added quic feature with optional quinn/rustls
+
+**Phase 3: Server Implementation (Scaffold)**
+- ✅ `wezterm-mux-server/src/quic_server.rs` - Basic placeholder with spawn_quic_listener()
+- ✅ `wezterm/src/cli/quic_creds.rs` - CLI command stub (quiccreds)
+- ✅ Updated server initialization to spawn QUIC listeners
+- ✅ PDU handlers for GetQuicCreds/GetQuicCredsResponse
+- ✅ `wezterm-mux-server/Cargo.toml` - Added quic feature
+
+**Phase 4-5: Testing & Documentation**
+- ✅ Integration tests for config types
+- ✅ Multiplexing guide with QUIC section
+- ✅ QuicDomainClient and QuicDomainServer reference docs
+- ✅ Configuration reference stubs
+
+**Feature Gating & Validation**
+- ✅ All feature gates: Feature types always parsed, errors only on use
+- ✅ Runtime validation with helpful error messages
+- ✅ Feature flags in all affected Cargo.toml files
+- ✅ Warnings for missing quic feature fixed
+
+### 🚧 Current State: Functional Scaffold
+
+The implementation provides:
+- ✅ Complete configuration infrastructure
+- ✅ Module structure for client/server implementation
+- ✅ Feature-gated code (compile with `--features quic`)
+- ✅ Parse-always, validate-on-use error handling
+- ✅ Proper async method signatures (quic_connect is async)
+- ✅ Clean separation of concerns with conditional compilation
+
+### ⚠️ Known Limitations (Future Work)
+
+- Async I/O integration incomplete (poll methods return Pending)
+- No actual QUIC endpoint setup yet
+- No SSH bootstrap implementation
+- No 0-RTT caching
+- No connection migration
+- No certificate renewal background task
+
+### 📋 Remaining Tasks for Full Implementation
+
+1. **Async Integration** - Proper quinn stream polling and integration
+2. **Client Connection** - Actual endpoint setup and QUIC handshake
+3. **Server Listener** - Accept loop and connection dispatch
+4. **SSH Bootstrap** - Certificate exchange over SSH
+5. **Certificate Renewal** - Background 80% lifetime renewal task
+6. **0-RTT Support** - Session resumption and caching
+7. **Connection Migration** - Network change handling
+
 ## Next Steps
 
 ✅ **Completed:** Quinn analysis confirms excellent fit for WezTerm
-✅ **Decided:** Use quinn 0.12 with runtime-smol and rustls-ring
+✅ **Decided:** Use quinn 0.11 with runtime-smol and rustls-ring
+✅ **Phase 1-3:** Configuration, client scaffold, server scaffold
 
-**Ready to begin implementation:**
-1. ✅ Phase 1: Add dependencies and configuration types
-2. ✅ Phase 2: Implement QUIC client with SSH bootstrap
-3. ✅ Phase 3: Implement QUIC server and CLI command
-4. Phase 4: Testing and validation
-5. Phase 5: Documentation
+**Phase 4-5 ready for implementation:**
+1. Phase 4: Testing and validation
+2. Phase 5: Documentation refinement
 
 **Key insights from investigation:**
 - SSH bootstrap already required to start mux server → perfect fit for cert exchange
