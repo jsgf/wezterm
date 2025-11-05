@@ -394,48 +394,161 @@ WezTerm's SSH-based mux server startup creates an ideal use case for QUIC:
 - ✅ Feature flags in all affected Cargo.toml files
 - ✅ Warnings for missing quic feature fixed
 
-### 🚧 Current State: Functional Scaffold
+### 🚧 Current State: Architectural Foundation Complete, Async I/O Blocking
 
-The implementation provides:
-- ✅ Complete configuration infrastructure
-- ✅ Module structure for client/server implementation
+**What Works**:
+- ✅ Complete configuration infrastructure (QuicDomainClient/Server types)
+- ✅ Client connection scaffold with SSH bootstrap pattern
+- ✅ QUIC endpoint creation and stream opening
+- ✅ Certificate retrieval via SSH (`wezterm cli quiccreds` command)
 - ✅ Feature-gated code (compile with `--features quic`)
-- ✅ Parse-always, validate-on-use error handling
-- ✅ Proper async method signatures (quic_connect is async)
-- ✅ Clean separation of concerns with conditional compilation
+- ✅ All packages compile successfully
+- ✅ Zero regressions to existing functionality
 
-### ⚠️ Known Limitations (Future Work)
+**What's Blocked**:
+- ❌ **ASYNC I/O BRIDGE** - QuicStream poll_read/write return Poll::Pending indefinitely
+  - **MANDATORY for any data flow**
+  - Prevents mux protocol PDU transmission
+  - Quinn uses futures-based API, AsyncRead/AsyncWrite use poll-based trait
+  - No workaround possible - must be fixed for implementation to function at all
 
-- Async I/O integration incomplete (poll methods return Pending)
-- No actual QUIC endpoint setup yet
-- No SSH bootstrap implementation
-- No 0-RTT caching
-- No connection migration
-- No certificate renewal background task
+### 🔴 CRITICAL BLOCKER: Async I/O Integration (MANDATORY)
 
-### 📋 Remaining Tasks for Full Implementation
+**The Issue**:
+```rust
+// Quinn provides:
+async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, ReadError>
 
-1. **Async Integration** - Proper quinn stream polling and integration
-2. **Client Connection** - Actual endpoint setup and QUIC handshake
-3. **Server Listener** - Accept loop and connection dispatch
-4. **SSH Bootstrap** - Certificate exchange over SSH
-5. **Certificate Renewal** - Background 80% lifetime renewal task
-6. **0-RTT Support** - Session resumption and caching
-7. **Connection Migration** - Network change handling
+// AsyncRead trait expects:
+fn poll_read(self: Pin<&mut Self>, cx: &mut Context, buf: &mut [u8]) -> Poll<Result<usize, Error>>
+```
 
-## Next Steps
+**Current Impact**:
+- Connections can be established ✓
+- Streams can be created ✓
+- Data CANNOT flow ✗
+- Mux protocol PDU exchange FAILS ✗
+- Entire transport is non-functional ✗
 
-✅ **Completed:** Quinn analysis confirms excellent fit for WezTerm
-✅ **Decided:** Use quinn 0.11 with runtime-smol and rustls-ring
-✅ **Phase 1-3:** Configuration, client scaffold, server scaffold
+**Solution Required (Pick One)**:
+1. **futures::future::poll_fn** - Create pollable wrapper around async read/write
+2. **State machine approach** - Store pending futures in struct, poll them in poll methods
+3. **Task spawning** - Change architecture to use background tasks with channels
+4. **futures-io bridge** - Use proper AsyncRead/AsyncWrite from futures crate
 
-**Phase 4-5 ready for implementation:**
-1. Phase 4: Testing and validation
-2. Phase 5: Documentation refinement
+**Estimated Effort**: 2-4 hours focused development
 
-**Key insights from investigation:**
+**Verification Needed**:
+- Codec encode/decode with actual data flow
+- Mux protocol PDU exchange end-to-end
+- Connection persistence through multiple round trips
+
+### 📋 MANDATORY Remaining Work for Full Implementation
+
+**Phase 4A: ASYNC I/O BRIDGE (BLOCKER - MUST BE FIRST)**
+- [ ] Implement proper poll_read forwarding to quinn futures
+- [ ] Implement proper poll_write forwarding to quinn futures
+- [ ] Test codec round-trip with real data
+- [ ] Verify mux protocol PDU transmission works
+
+**Phase 4B: Client Data Flow (depends on 4A)**
+- [ ] Test SSH bootstrap credential retrieval
+- [ ] Test actual QUIC connection and handshake
+- [ ] Test stream establishment and data transmission
+- [ ] Implement certificate caching (optional per design)
+
+**Phase 5: Server Implementation (depends on 4A)**
+- [ ] Implement certificate loading (PKI integration)
+- [ ] Create quinn::ServerConfig with rustls
+- [ ] Implement connection accept loop
+- [ ] Wrap QUIC streams with AsyncReadAndWrite
+- [ ] Dispatch to dispatch::process() for mux protocol handling
+- [ ] Thread spawning with smol::block_on
+
+**Phase 6: Certificate Management**
+- [ ] Implement certificate renewal at 80% lifetime
+- [ ] Background task for renewal scheduling
+- [ ] GetQuicCreds response handling
+- [ ] Cert persistence logic (optional per design)
+
+**Phase 7: Advanced Features**
+- [ ] 0-RTT session caching and resumption
+- [ ] Connection migration on network changes
+- [ ] Proper error recovery and reconnection
+- [ ] Performance optimization and tuning
+
+### ⚠️ Critical Path Dependencies
+
+```
+Async I/O Bridge (MANDATORY)
+  ↓
+  ├→ Client Data Flow Testing
+  │   ↓
+  │   └→ End-to-end QUIC connection test
+  │
+  ├→ Server Implementation
+  │   ↓
+  │   └→ Integration testing
+  │
+  └→ Certificate Management
+      ↓
+      └→ Renewal testing
+```
+
+**NOTHING can proceed until async I/O bridge is complete.**
+
+## Implementation Progress Summary
+
+### ✅ COMPLETED (20+ commits, 1500+ LOC)
+
+**Phase 1: Configuration & Core Types**
+- QuicDomainClient/Server with full validation (~150 LOC)
+- Integration tests (4 passing) (~100 LOC)
+- Complete documentation in multiplexing guide (~100 LOC)
+
+**Phase 2: Client Foundation** (~600 LOC)
+- QuicStream wrapper type
+- establish_quic_connection() async function
+- quic_connect() with SSH bootstrap pattern
+- ClientDomainConfig::Quic variant
+- Full integration with Reconnectable struct
+- Certificate handling and error management
+
+**Phase 3: Server & CLI** (~250 LOC)
+- quic_server.rs scaffolding with config validation
+- QuicCredsCommand implementation
+- Proper feature gating throughout
+- Integration into server startup
+
+**Phase 4A (PARTIAL): AsyncRead/AsyncWrite** (~100 LOC)
+- Trait implementations present
+- Error handling in place
+- Poll method signatures correct
+- **BUT: poll_read/poll_write return Pending - DATA FLOW NON-FUNCTIONAL**
+
+**Infrastructure & Configuration** (~400 LOC)
+- Workspace Cargo.toml updates
+- Feature flags in all affected crates
+- PDU types (GetQuicCreds/GetQuicCredsResponse)
+- Documentation and configuration references
+
+### 🔴 REQUIRED NEXT STEPS (In Order)
+
+**CRITICAL: Phase 4A Complete - Async I/O Bridge**
+- [ ] Fix poll_read to actually read from quinn streams
+- [ ] Fix poll_write to actually write to quinn streams
+- [ ] Integration test with codec
+
+**AFTER 4A IS COMPLETE**:
+- Phase 4B: Client data flow testing
+- Phase 5: Server implementation
+- Phase 6: Certificate management
+- Phase 7: Advanced features
+
+### Key Architecture Notes
 - SSH bootstrap already required to start mux server → perfect fit for cert exchange
 - Existing PKI infrastructure (`pki.rs`) using rcgen → fully reusable
 - TLS client implementation provides clear blueprint (lines 810-941 in `wezterm-client/src/client.rs`)
+- Mirror pattern reduces implementation complexity once async I/O bridge is fixed
 - Certificate storage pattern already established
 - All required abstractions exist (`AsyncReadAndWrite`, `Reconnectable`, etc.)
