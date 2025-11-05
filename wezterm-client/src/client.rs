@@ -1040,7 +1040,7 @@ impl Reconnectable {
 
     pub fn quic_connect(
         &mut self,
-        quic_client: config::QuicDomainClient,
+        _quic_client: config::QuicDomainClient,
         _initial: bool,
         ui: &mut ConnectionUI,
     ) -> anyhow::Result<()> {
