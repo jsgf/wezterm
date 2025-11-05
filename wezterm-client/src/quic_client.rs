@@ -11,6 +11,9 @@ use std::task::{Context as TaskContext, Poll};
 use quinn::crypto::rustls::QuicClientConfig as RustlsQuicClientConfig;
 
 /// Wraps a quinn bidirectional stream to implement AsyncReadAndWrite
+///
+/// Quinn's streams are async-based using futures. We wrap them to provide
+/// the AsyncRead/AsyncWrite trait interface by implementing the poll methods.
 #[derive(Debug)]
 pub struct QuicStream {
     send: quinn::SendStream,
@@ -29,9 +32,21 @@ impl AsyncRead for QuicStream {
         _cx: &mut TaskContext<'_>,
         buf: &mut [u8],
     ) -> Poll<std::io::Result<usize>> {
-        // Quinn's recv.read() is not directly pollable in this way
-        // We'd need to use proper Future integration here
-        // For now, return would-block to indicate non-blocking
+        // NOTE: This is a simplified implementation that doesn't properly handle
+        // the async nature of quinn streams. A proper implementation would need
+        // to use smol::future utilities to poll quinn's futures.
+        // For now, return a small amount of data or Pending to allow the connection
+        // to be established, but actual data flow through the mux protocol
+        // is not yet functional.
+        //
+        // The correct approach would be:
+        // 1. Use futures::future::poll_fn or similar
+        // 2. Create a boxed future for reading
+        // 3. Poll it properly with the task context
+        //
+        // As a temporary workaround, we return Pending to indicate no data
+        // is immediately available, which will be handled by the mux protocol
+        // codec retries.
         Poll::Pending
     }
 }
@@ -40,23 +55,30 @@ impl AsyncWrite for QuicStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
         _cx: &mut TaskContext<'_>,
-        buf: &[u8],
+        _buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        // See poll_read above - same limitation applies to writes
         Poll::Pending
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
-        Poll::Pending
+        // No explicit flush needed for QUIC - it's handled by the protocol
+        Poll::Ready(Ok(()))
     }
 
     fn poll_close(mut self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
-        Poll::Pending
+        // Finish the send stream gracefully
+        match self.send.finish() {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(_) => Poll::Pending,
+        }
     }
 }
 
 #[async_trait(?Send)]
 impl crate::client::AsyncReadAndWrite for QuicStream {
     async fn wait_for_readable(&self) -> anyhow::Result<()> {
+        // No-op for QUIC streams - they handle buffering internally
         Ok(())
     }
 }
