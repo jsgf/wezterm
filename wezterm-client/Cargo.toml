@@ -38,6 +38,8 @@ wezterm-dynamic.workspace = true
 wezterm-ssh.workspace = true
 wezterm-term = { workspace=true, features=["use_serde"] }
 wezterm-uds.workspace = true
+quinn = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
 
 [target."cfg(windows)".dependencies]
 winapi = { workspace=true, features = [
