@@ -306,6 +306,7 @@ fn terminate_with_error(err: anyhow::Error) -> ! {
 }
 
 mod ossl;
+#[cfg(feature = "quic")]
 mod quic_server;
 
 pub fn spawn_listener() -> anyhow::Result<()> {
@@ -322,8 +323,11 @@ pub fn spawn_listener() -> anyhow::Result<()> {
         ossl::spawn_tls_listener(tls_server)?;
     }
 
-    for quic_server in &config.quic_servers {
-        quic_server::spawn_quic_listener(quic_server)?;
+    #[cfg(feature = "quic")]
+    {
+        for quic_server in &config.quic_servers {
+            quic_server::spawn_quic_listener(quic_server)?;
+        }
     }
 
     Ok(())

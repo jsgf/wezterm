@@ -28,9 +28,11 @@ wezterm-gui-subcommands.workspace = true
 wezterm-term.workspace = true
 quinn = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
+quinn-proto = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
 
 [features]
-quic = ["quinn", "rustls"]
+quic = ["quinn", "rustls", "quinn-proto", "webpki-roots"]
 
 [target."cfg(windows)".dependencies]
 winapi = { workspace=true, features = [ "winuser" ]}
