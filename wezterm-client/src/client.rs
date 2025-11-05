@@ -1391,6 +1391,7 @@ impl Client {
     );
     rpc!(get_codec_version, GetCodecVersion, GetCodecVersionResponse);
     rpc!(get_tls_creds, GetTlsCreds = (), GetTlsCredsResponse);
+    rpc!(get_quic_creds, GetQuicCreds = (), GetQuicCredsResponse);
     rpc!(
         search_scrollback,
         SearchScrollbackRequest,
