@@ -3,7 +3,9 @@
     "allow": [
       "Read(//home/jsgf/git/quinn/**)",
       "Bash(find:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(cargo tree:*)",
+      "Bash(cargo metadata:*)"
     ],
     "deny": [],
     "ask": []
