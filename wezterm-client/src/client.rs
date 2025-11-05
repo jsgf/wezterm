@@ -1044,8 +1044,16 @@ impl Reconnectable {
         _initial: bool,
         ui: &mut ConnectionUI,
     ) -> anyhow::Result<()> {
-        ui.output_str("QUIC transport not yet fully implemented\n");
-        bail!("QUIC transport not yet fully implemented");
+        #[cfg(feature = "quic")]
+        {
+            ui.output_str("QUIC transport not yet fully implemented\n");
+            bail!("QUIC transport not yet fully implemented");
+        }
+        #[cfg(not(feature = "quic"))]
+        {
+            ui.output_str("QUIC support is not compiled in. Rebuild wezterm with: cargo build --features quic\n");
+            bail!("QUIC support is not compiled in. Rebuild wezterm with: cargo build --features quic");
+        }
     }
 }
 
