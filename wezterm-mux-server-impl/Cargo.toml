@@ -7,6 +7,9 @@ publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+quic = ["config/quic", "wezterm-client/quic"]
+
 [dependencies]
 anyhow.workspace = true
 async-io.workspace = true
@@ -26,6 +29,7 @@ rangeset.workspace = true
 rcgen.workspace = true
 smol.workspace = true
 termwiz = { workspace=true, features=["use_serde"] }
+time.workspace = true
 url.workspace = true
 wezterm-client.workspace = true
 wezterm-term = { workspace=true, features=["use_serde"] }
