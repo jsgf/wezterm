@@ -35,6 +35,8 @@ use std::time::Duration;
 use thiserror::Error;
 use wezterm_uds::UnixStream;
 
+mod quic_client;
+
 #[derive(Error, Debug)]
 #[error("Timeout")]
 struct Timeout;
@@ -634,6 +636,7 @@ impl Reconnectable {
             // level disconnect, because we will otherwise throw up authentication
             // dialogs that would be annoying
             ClientDomainConfig::Ssh(_) => false,
+            ClientDomainConfig::Quic(_) => true,
         }
     }
 
@@ -649,6 +652,7 @@ impl Reconnectable {
             }
             ClientDomainConfig::Tls(tls) => self.tls_connect(tls, initial, ui),
             ClientDomainConfig::Ssh(ssh) => self.ssh_connect(ssh, initial, ui),
+            ClientDomainConfig::Quic(quic) => self.quic_connect(quic, initial, ui),
         }
     }
 
@@ -990,6 +994,19 @@ impl Reconnectable {
         ui.output_str("TLS Connected!\n");
         Ok(stream)
     }
+
+    #[cfg(not(feature = "quic"))]
+    pub fn quic_connect(
+        &mut self,
+        _quic_client: config::QuicDomainClient,
+        _initial: bool,
+        ui: &mut ConnectionUI,
+    ) -> anyhow::Result<()> {
+        ui.output_str(
+            "QUIC support is not compiled in. Rebuild wezterm with: cargo build --features quic\n",
+        );
+        bail!("QUIC support is not compiled in. Rebuild wezterm with: cargo build --features quic");
+    }
 }
 
 impl Client {
@@ -1251,6 +1268,18 @@ impl Client {
         ui: &mut ConnectionUI,
     ) -> anyhow::Result<Self> {
         let mut reconnectable = Reconnectable::new(ClientDomainConfig::Ssh(ssh_dom.clone()), None);
+        let no_auto_start = true;
+        reconnectable.connect(true, ui, no_auto_start)?;
+        Ok(Self::new(Some(local_domain_id), reconnectable))
+    }
+
+    pub fn new_quic(
+        local_domain_id: DomainId,
+        quic_client: &config::QuicDomainClient,
+        ui: &mut ConnectionUI,
+    ) -> anyhow::Result<Self> {
+        let mut reconnectable =
+            Reconnectable::new(ClientDomainConfig::Quic(quic_client.clone()), None);
         let no_auto_start = true;
         reconnectable.connect(true, ui, no_auto_start)?;
         Ok(Self::new(Some(local_domain_id), reconnectable))
