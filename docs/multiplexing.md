@@ -282,3 +282,102 @@ remote terminal session
 ```console
 $ wezterm connect server.name
 ```
+
+## QUIC Domains
+
+A connection to a multiplexer made via a [QUIC](https://en.wikipedia.org/wiki/QUIC)
+encrypted UDP connection is referred to as a *QUIC Domain*. QUIC provides several
+advantages over TLS:
+
+- **0-RTT Reconnection**: Reconnections are much faster (< 10ms) because the
+  protocol state and certificates are cached locally
+- **Connection Migration**: The connection seamlessly survives network changes
+  (e.g., switching from WiFi to Ethernet)
+- **Improved NAT Traversal**: UDP-based transport handles network transitions better
+- **No Head-of-Line Blocking**: Independent multiplexed streams prevent one slow
+  request from blocking others
+
+Like TLS domains, QUIC uses SSH bootstrapping to securely exchange certificates on
+first connection, then operates independently of SSH for all subsequent connections.
+
+!!! note
+    QUIC support in wezterm is currently in development and is considered experimental.
+    The API and configuration may change.
+
+### Configuring the client
+
+For each server that you wish to connect to, add a client section like this:
+
+```lua
+config.quic_clients = {
+  {
+    -- A handy alias for this session; you will use `wezterm connect server.name`
+    -- to connect to it.
+    name = 'server.name',
+    -- The host:port for the remote host
+    remote_address = 'server.hostname:9001',
+    -- The value can be "user@host:port"; it accepts the same syntax as the
+    -- `wezterm ssh` subcommand.
+    bootstrap_via_ssh = 'server.hostname',
+    -- Enable 0-RTT for faster reconnections (default: true)
+    enable_0rtt = true,
+    -- Enable connection migration for network changes (default: true)
+    enable_migration = true,
+  },
+}
+```
+
+[See QuicDomainClient](config/lua/QuicDomainClient.md) for more information on possible
+settings.
+
+### Configuring the server
+
+```lua
+config.quic_servers = {
+  {
+    -- The host:port combination on which the server will listen
+    -- for connections
+    bind_address = 'server.hostname:9001',
+    -- Certificate lifetime in days (default: 7 days)
+    certificate_lifetime_days = 7,
+  },
+}
+```
+
+[See QuicDomainServer](config/lua/QuicDomainServer.md) for more information on possible
+settings.
+
+### Connecting
+
+On the client, running this will connect to the server, start up
+the multiplexer and obtain a certificate for the QUIC connection.
+A connection window will show the progress and may prompt you for
+SSH authentication.  Once the connection has been initiated, wezterm
+will automatically reconnect using the certificate it obtained during
+bootstrapping if your connection was interrupted and resume your
+remote terminal session.
+
+```console
+$ wezterm connect server.name
+```
+
+### Certificate Management
+
+QUIC certificates are automatically generated and managed by wezterm:
+
+- **Initial Connection**: SSH bootstrap exchanges certificates securely
+- **Short-Lived Certificates**: By default, certificates expire after 7 days
+  (configurable via `certificate_lifetime_days`)
+- **Automatic Renewal**: Certificates are automatically renewed in the background
+  before expiry, without requiring SSH re-authentication
+- **In-Memory Storage**: Certificates are kept in memory by default for improved
+  security (can be persisted to disk via `persist_to_disk` config option)
+- **Graceful Fallback**: If certificates expire, the client will automatically
+  re-bootstrap via SSH on the next connection
+
+### Performance Comparison
+
+Typical connection establishment times:
+
+- **TLS Domain**: ~100-500ms initial + ~50-100ms reconnect
+- **QUIC Domain**: ~100-500ms initial + **< 10ms reconnect** (0-RTT)
