@@ -20,10 +20,12 @@ use winapi::shared::ws2def::{AF_UNSPEC, AI_CANONNAME, SOCK_DGRAM};
 pub struct Pki {
     ca_cert: Certificate,
     pki_dir: PathBuf,
+    cert_lifetime_days: u32,
 }
 
 impl Pki {
-    pub fn init() -> anyhow::Result<Self> {
+    /// Initialize PKI with configurable certificate lifetime (in days)
+    pub fn init_with_lifetime(cert_lifetime_days: u32) -> anyhow::Result<Self> {
         let pki_dir = config::pki_dir()?;
         std::fs::create_dir_all(&pki_dir)?;
         log::debug!("pki dir is {}", pki_dir.display());
@@ -81,7 +83,16 @@ impl Pki {
         std::fs::write(&server_pem_path, signed_cert.as_bytes())
             .context(format!("saving {}", server_pem_path.display()))?;
 
-        Ok(Self { pki_dir, ca_cert })
+        Ok(Self {
+            pki_dir,
+            ca_cert,
+            cert_lifetime_days,
+        })
+    }
+
+    /// Initialize PKI with default certificate lifetime (7 days)
+    pub fn init() -> anyhow::Result<Self> {
+        Self::init_with_lifetime(7)
     }
 
     pub fn generate_client_cert(&self) -> anyhow::Result<String> {
