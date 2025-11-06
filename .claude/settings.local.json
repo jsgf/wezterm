@@ -5,7 +5,8 @@
       "Bash(find:*)",
       "Bash(cargo test:*)",
       "Bash(cargo tree:*)",
-      "Bash(cargo metadata:*)"
+      "Bash(cargo metadata:*)",
+      "Bash(cargo build:*)"
     ],
     "deny": [],
     "ask": []

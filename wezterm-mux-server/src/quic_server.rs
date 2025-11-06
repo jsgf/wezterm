@@ -171,11 +171,7 @@ fn run_quic_listener(bind_address: &str, cert_lifetime_days: u32) -> anyhow::Res
         rustls_pemfile::Item::Sec1Key(key) => {
             rustls::pki_types::PrivateKeyDer::Sec1(key)
         }
-        #[cfg(feature = "rsa")]
-        rustls_pemfile::Item::RsaKey(key) => {
-            rustls::pki_types::PrivateKeyDer::Rsa(key)
-        }
-        _ => anyhow::bail!("unsupported key type in PEM"),
+        _ => anyhow::bail!("unsupported key type in PEM (expected PKCS8 or SEC1)"),
     };
 
     // Load CA certificate for client verification
@@ -204,26 +200,63 @@ fn run_quic_listener(bind_address: &str, cert_lifetime_days: u32) -> anyhow::Res
         .context("converting to QUIC config")?;
     let quinn_config = quinn::ServerConfig::with_crypto(Arc::new(quinn_config));
 
-    // Note: Full QUIC endpoint implementation requires wrapping quinn's async API
-    // with smol runtime. The following is a scaffold that demonstrates the architecture:
-    //
-    // 1. Create quinn::Endpoint with ServerConfig and bound UDP socket
-    // 2. Accept connections in accept() loop
-    // 3. For each connection, accept bidirectional streams
-    // 4. Wrap each stream in QuicStream (which implements AsyncRead/AsyncWrite)
-    // 5. Process via process_quic_stream which handles mux protocol PDUs
-    //
-    // Current limitation: quinn's Endpoint requires specific async runtime setup.
-    // Needs integration with smol's runtime and proper AsyncUdpSocket wrapping.
+    // Bind UDP socket
+    let socket = std::net::UdpSocket::bind(listen_addr)
+        .context("binding UDP socket")?;
+    socket.set_nonblocking(true)
+        .context("setting socket to non-blocking")?;
 
-    log::warn!("QUIC server: {} - architecture implemented, endpoint binding needs quinn async integration", listen_addr);
-    log::warn!("QUIC server scaffold complete with:");
-    log::warn!("  - Certificate loading and validation");
-    log::warn!("  - QuicStream wrapper (AsyncRead+AsyncWrite)");
-    log::warn!("  - PDU handler (process_quic_stream)");
-    log::warn!("  - TLS config from rustls");
+    // Create Quinn endpoint with smol runtime
+    let runtime = quinn::default_runtime()
+        .ok_or_else(|| anyhow!("no async runtime available"))?;
 
-    // For now, just initialize PKI and exit
-    // In a full implementation, this would spawn the actual listener
+    let endpoint = quinn::Endpoint::new(Default::default(), Some(quinn_config), socket, runtime)
+        .context("creating QUIC endpoint")?;
+
+    log::info!("QUIC server listening on {}", listen_addr);
+
+    // Run the accept loop in smol context
+    smol::block_on(async {
+        loop {
+            match endpoint.accept().await {
+                Some(connecting) => {
+                    let connection = match connecting.await {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            log::error!("QUIC handshake failed: {}", e);
+                            continue;
+                        }
+                    };
+
+                    let peer_addr = connection.remote_address();
+                    log::debug!("QUIC connection from {}", peer_addr);
+
+                    // Spawn stream handler
+                    let _handle = smol::spawn(async move {
+                        match connection.accept_bi().await {
+                            Ok((send, recv)) => {
+                                let stream = QuicStream::new(send, recv);
+
+                                // Dispatch to main thread for mux processing
+                                spawn_into_main_thread(async move {
+                                    if let Err(e) = process_quic_stream(stream).await {
+                                        log::error!("QUIC stream error: {}", e);
+                                    }
+                                }).detach();
+                            }
+                            Err(e) => {
+                                log::error!("Failed to accept QUIC stream from {}: {}", peer_addr, e);
+                            }
+                        }
+                    });
+                }
+                None => {
+                    log::info!("QUIC endpoint closed");
+                    break;
+                }
+            }
+        }
+    });
+
     Ok(())
 }

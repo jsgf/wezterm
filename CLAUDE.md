@@ -1,0 +1,2 @@
+- quinn checked out to crates.io published version 0.11.2 at /home/jeremy/git/quinn
+- Overall plan in @QUIC_PLAN.md

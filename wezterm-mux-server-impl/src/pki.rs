@@ -3,6 +3,7 @@ use anyhow::{anyhow, Context as _};
 use libc::{AF_UNSPEC, AI_CANONNAME, SOCK_DGRAM};
 use rcgen::{BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, IsCa};
 use std::path::PathBuf;
+use time::{Duration, OffsetDateTime};
 #[cfg(windows)]
 use winapi::shared::ws2def::{AF_UNSPEC, AI_CANONNAME, SOCK_DGRAM};
 
@@ -59,10 +60,16 @@ impl Pki {
 
         let unix_name = config::username_from_env()?;
 
+        // Calculate certificate validity period
+        let now = OffsetDateTime::now_utc();
+        let lifetime = Duration::days(cert_lifetime_days as i64);
+
         // Create the CA certificate
         let mut ca_params = CertificateParams::new(alt_names.clone());
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(1));
         ca_params.serial_number = Some(0.into());
+        ca_params.not_before = now;
+        ca_params.not_after = now + lifetime;
         let ca_cert = Certificate::from_params(ca_params)?;
         let ca_pem = ca_cert.serialize_pem()?;
         let ca_pem_path = pki_dir.join("ca.pem");
@@ -73,6 +80,8 @@ impl Pki {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, unix_name);
         params.distinguished_name = dn;
+        params.not_before = now;
+        params.not_after = now + lifetime;
 
         let server_cert = Certificate::from_params(params)?;
         let mut signed_cert = server_cert.serialize_pem_with_signer(&ca_cert)?;
@@ -102,6 +111,12 @@ impl Pki {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, unix_name);
         params.distinguished_name = dn;
+
+        // Apply certificate lifetime from config
+        let now = OffsetDateTime::now_utc();
+        let lifetime = Duration::days(self.cert_lifetime_days as i64);
+        params.not_before = now;
+        params.not_after = now + lifetime;
 
         let client_cert = Certificate::from_params(params)?;
         let mut signed_cert = client_cert.serialize_pem_with_signer(&self.ca_cert)?;
