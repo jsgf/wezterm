@@ -7095,6 +7095,7 @@ dependencies = [
  "rangeset",
  "ratelim",
  "rustls",
+ "rustls-pemfile",
  "smol",
  "termwiz",
  "textwrap",

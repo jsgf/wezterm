@@ -43,9 +43,10 @@ rustls = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
 quinn-proto = { workspace = true, optional = true }
 futures-lite = { workspace = true, optional = true }
+rustls-pemfile = { version = "2", optional = true }
 
 [features]
-quic = ["quinn", "rustls", "webpki-roots", "quinn-proto", "futures-lite"]
+quic = ["quinn", "rustls", "webpki-roots", "quinn-proto", "futures-lite", "rustls-pemfile"]
 
 [target."cfg(windows)".dependencies]
 winapi = { workspace=true, features = [

@@ -5,6 +5,7 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use smol::io::{AsyncRead, AsyncWrite};
 use std::convert::TryFrom;
+use std::io::Cursor;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
@@ -94,8 +95,8 @@ impl crate::client::AsyncReadAndWrite for QuicStream {
 /// Establish a QUIC connection to a remote mux server
 pub async fn establish_quic_connection(
     remote_address: &str,
-    _client_cert_pem: Option<String>,
-    _ca_cert_pem: Option<String>,
+    client_cert_pem: Option<String>,
+    ca_cert_pem: Option<String>,
 ) -> anyhow::Result<Box<dyn crate::client::AsyncReadAndWrite>> {
     // Parse remote address
     let socket_addr: std::net::SocketAddr = remote_address
@@ -112,18 +113,68 @@ pub async fn establish_quic_connection(
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)
         .context("Failed to create QUIC endpoint")?;
 
-    // Create rustls client config - trust system root certificates
+    // Build root certificate store
     let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-    let client_crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    // If CA certificate is provided, use it; otherwise use system roots
+    if let Some(ca_pem) = ca_cert_pem {
+        let mut cursor = Cursor::new(ca_pem.as_bytes());
+        let certs: Vec<rustls::pki_types::CertificateDer> = rustls_pemfile::certs(&mut cursor)
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to parse CA certificate")?;
 
-    // Convert to QuicClientConfig using TryFrom
-    let quic_client_config = RustlsQuicClientConfig::try_from(client_crypto)?;
-    let client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
-    endpoint.set_default_client_config(client_config);
+        for cert in certs {
+            roots.add(cert)
+                .context("Failed to add CA certificate to root store")?;
+        }
+    } else {
+        // Fallback to system roots if no custom CA provided
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+
+    let client_config_builder = rustls::ClientConfig::builder()
+        .with_root_certificates(roots);
+
+    // If client certificate is provided, use it for mutual TLS
+    if let Some(cert_pem) = client_cert_pem {
+        let mut cert_cursor = Cursor::new(cert_pem.as_bytes());
+
+        // Extract certificate chain
+        let certs: Vec<rustls::pki_types::CertificateDer> = rustls_pemfile::certs(&mut cert_cursor)
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to parse client certificate")?;
+
+        // Extract private key - reset cursor and read again for key extraction
+        let mut key_cursor = Cursor::new(cert_pem.as_bytes());
+        let key_item = rustls_pemfile::read_one(&mut key_cursor)
+            .context("Failed to read private key")?
+            .ok_or_else(|| anyhow!("No private key found in PEM"))?;
+
+        let private_key = match key_item {
+            rustls_pemfile::Item::Pkcs8Key(key) => {
+                rustls::pki_types::PrivateKeyDer::Pkcs8(key)
+            }
+            rustls_pemfile::Item::Sec1Key(key) => {
+                rustls::pki_types::PrivateKeyDer::Sec1(key)
+            }
+            _ => anyhow::bail!("Unsupported private key format"),
+        };
+
+        let client_crypto = client_config_builder
+            .with_client_auth_cert(certs, private_key)
+            .context("Failed to configure client certificate")?;
+
+        let quic_client_config = RustlsQuicClientConfig::try_from(client_crypto)?;
+        let client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
+        endpoint.set_default_client_config(client_config);
+    } else {
+        // No client certificate - use no client auth
+        let client_crypto = client_config_builder.with_no_client_auth();
+
+        let quic_client_config = RustlsQuicClientConfig::try_from(client_crypto)?;
+        let client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
+        endpoint.set_default_client_config(client_config);
+    }
 
     // Connect to server
     let connection = endpoint
