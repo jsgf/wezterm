@@ -12,6 +12,7 @@ publish = false
 anyhow.workspace = true
 async_ossl.workspace = true
 clap.workspace = true
+codec.workspace = true
 config.workspace = true
 env-bootstrap.workspace = true
 libc.workspace = true
@@ -30,9 +31,13 @@ quinn = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 quinn-proto = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
+wezterm-client = { workspace = true, optional = true }
+rustls-pemfile = { version = "2", optional = true }
+smol = { workspace = true, optional = true }
+futures-lite = { workspace = true, optional = true }
 
 [features]
-quic = ["quinn", "rustls", "quinn-proto", "webpki-roots"]
+quic = ["quinn", "rustls", "quinn-proto", "webpki-roots", "wezterm-client", "rustls-pemfile", "smol", "futures-lite"]
 
 [target."cfg(windows)".dependencies]
 winapi = { workspace=true, features = [ "winuser" ]}
