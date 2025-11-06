@@ -30,37 +30,55 @@ impl QuicStream {
 impl AsyncRead for QuicStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        _cx: &mut TaskContext<'_>,
-        _buf: &mut [u8],
+        cx: &mut TaskContext<'_>,
+        buf: &mut [u8],
     ) -> Poll<std::io::Result<usize>> {
-        // NOTE: This is a simplified implementation. Quinn's streams use futures, not the poll trait.
-        // A proper implementation would require using poll_fn or similar to bridge the two systems.
-        // For now, this returns Pending to indicate data isn't immediately available,
-        // which allows the connection to be established but prevents data flow.
-        Poll::Pending
+        // Quinn's RecvStream uses futures_io::AsyncRead but with quinn::ReadError.
+        // We need to forward and convert the error type to std::io::Error.
+        // Quinn's trait methods are available through the Deref implementation of Pin.
+        match Pin::new(&mut self.recv).poll_read(cx, buf) {
+            Poll::Ready(Ok(n)) => Poll::Ready(Ok(n)),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("QUIC read error: {:?}", e),
+            ))),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
 impl AsyncWrite for QuicStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
-        _cx: &mut TaskContext<'_>,
-        _buf: &[u8],
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        // Same limitation as poll_read - requires futures integration
-        Poll::Pending
+        // Quinn's SendStream uses futures_io::AsyncWrite but with quinn::WriteError.
+        // We need to forward and convert the error type to std::io::Error.
+        // Quinn's trait methods are available through the Deref implementation of Pin.
+        match Pin::new(&mut self.send).poll_write(cx, buf) {
+            Poll::Ready(Ok(n)) => Poll::Ready(Ok(n)),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("QUIC write error: {:?}", e),
+            ))),
+            Poll::Pending => Poll::Pending,
+        }
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
-        // QUIC doesn't need explicit flushing - the protocol handles it
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        // QUIC doesn't require explicit flushing - data is sent when available
         Poll::Ready(Ok(()))
     }
 
     fn poll_close(mut self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
-        // Try to finish the send stream
+        // Try to finish the send stream (non-blocking operation)
         match self.send.finish() {
             Ok(()) => Poll::Ready(Ok(())),
-            Err(_) => Poll::Pending,
+            Err(_e) => Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "QUIC send stream already closed or in error state",
+            ))),
         }
     }
 }
