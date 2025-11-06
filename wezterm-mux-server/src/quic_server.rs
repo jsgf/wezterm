@@ -2,15 +2,15 @@
 // Handles QUIC endpoint setup and connection acceptance
 
 use anyhow::{anyhow, Context};
-use codec::{Pdu, DecodedPdu};
+use codec::{DecodedPdu, Pdu};
 use config::QuicDomainServer;
 use promise::spawn::spawn_into_main_thread;
-use std::sync::Arc;
+use quinn::rustls;
+use smol::io::{AsyncRead, AsyncWrite};
 use std::convert::TryFrom;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
-use smol::io::{AsyncRead, AsyncWrite};
-use quinn::rustls;
 
 /// Wraps QUIC streams to implement AsyncRead/AsyncWrite
 #[derive(Debug)]
@@ -64,7 +64,10 @@ impl AsyncWrite for QuicStream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        _cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
         match self.send.finish() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(_e) => Poll::Ready(Err(std::io::Error::new(
@@ -79,8 +82,8 @@ impl AsyncWrite for QuicStream {
 /// This is a simplified version that handles the mux protocol without
 /// relying on the file descriptor-based dispatch system
 pub async fn process_quic_stream(mut stream: QuicStream) -> anyhow::Result<()> {
-    use wezterm_mux_server_impl::sessionhandler::{SessionHandler, PduSender};
     use smol::channel::unbounded;
+    use wezterm_mux_server_impl::sessionhandler::{PduSender, SessionHandler};
 
     log::debug!("Processing QUIC stream");
 
@@ -98,10 +101,9 @@ pub async fn process_quic_stream(mut stream: QuicStream) -> anyhow::Result<()> {
 
     loop {
         // Try to receive messages or read from stream
-        match smol::future::or(
-            async { item_rx.recv().await.ok() },
-            async { Pdu::decode_async(&mut stream, None).await.ok() },
-        )
+        match smol::future::or(async { item_rx.recv().await.ok() }, async {
+            Pdu::decode_async(&mut stream, None).await.ok()
+        })
         .await
         {
             Some(decoded) => {
@@ -143,7 +145,9 @@ fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()> {
     let listen_addr: std::net::SocketAddr = quic_server.bind_address.parse()?;
 
     // Initialize PKI with configured certificate lifetime
-    let pki = wezterm_mux_server_impl::pki::Pki::init_with_lifetime(quic_server.certificate_lifetime_days)?;
+    let pki = wezterm_mux_server_impl::pki::Pki::init_with_lifetime(
+        quic_server.certificate_lifetime_days,
+    )?;
 
     // Load server certificate and key
     let cert_path = pki.server_pem();
@@ -151,8 +155,8 @@ fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()> {
 
     let cert_data = std::fs::read(&cert_path)
         .context(format!("reading server cert from {}", cert_path.display()))?;
-    let ca_data = std::fs::read(&ca_path)
-        .context(format!("reading CA cert from {}", ca_path.display()))?;
+    let ca_data =
+        std::fs::read(&ca_path).context(format!("reading CA cert from {}", ca_path.display()))?;
 
     // Parse PEM into rustls format
     let cert_chain: Vec<rustls::pki_types::CertificateDer> =
@@ -166,12 +170,8 @@ fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("no private key found in PEM"))?;
 
     let server_key = match key_bytes {
-        rustls_pemfile::Item::Pkcs8Key(key) => {
-            rustls::pki_types::PrivateKeyDer::Pkcs8(key)
-        }
-        rustls_pemfile::Item::Sec1Key(key) => {
-            rustls::pki_types::PrivateKeyDer::Sec1(key)
-        }
+        rustls_pemfile::Item::Pkcs8Key(key) => rustls::pki_types::PrivateKeyDer::Pkcs8(key),
+        rustls_pemfile::Item::Sec1Key(key) => rustls::pki_types::PrivateKeyDer::Sec1(key),
         _ => anyhow::bail!("unsupported key type in PEM (expected PKCS8 or SEC1)"),
     };
 
@@ -205,7 +205,7 @@ fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()> {
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(
         quinn::IdleTimeout::try_from(quic_server.max_idle_timeout)
-            .context("Invalid max_idle_timeout")?
+            .context("Invalid max_idle_timeout")?,
     ));
     if let Some(keep_alive) = quic_server.keep_alive_interval {
         transport.keep_alive_interval(Some(keep_alive));
@@ -213,14 +213,13 @@ fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()> {
     quinn_config.transport_config(Arc::new(transport));
 
     // Bind UDP socket
-    let socket = std::net::UdpSocket::bind(listen_addr)
-        .context("binding UDP socket")?;
-    socket.set_nonblocking(true)
+    let socket = std::net::UdpSocket::bind(listen_addr).context("binding UDP socket")?;
+    socket
+        .set_nonblocking(true)
         .context("setting socket to non-blocking")?;
 
     // Create Quinn endpoint with smol runtime
-    let runtime = quinn::default_runtime()
-        .ok_or_else(|| anyhow!("no async runtime available"))?;
+    let runtime = quinn::default_runtime().ok_or_else(|| anyhow!("no async runtime available"))?;
 
     let endpoint = quinn::Endpoint::new(Default::default(), Some(quinn_config), socket, runtime)
         .context("creating QUIC endpoint")?;
@@ -254,10 +253,15 @@ fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()> {
                                     if let Err(e) = process_quic_stream(stream).await {
                                         log::error!("QUIC stream error: {}", e);
                                     }
-                                }).detach();
+                                })
+                                .detach();
                             }
                             Err(e) => {
-                                log::error!("Failed to accept QUIC stream from {}: {}", peer_addr, e);
+                                log::error!(
+                                    "Failed to accept QUIC stream from {}: {}",
+                                    peer_addr,
+                                    e
+                                );
                             }
                         }
                     });

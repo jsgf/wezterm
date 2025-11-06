@@ -438,17 +438,24 @@ async fn client_thread_async(
                 if reconnectable.should_renew_quic_cert() {
                     log::info!("QUIC certificate approaching expiry, attempting renewal");
                     // Try to renew by sending GetQuicCreds request
-                    match Pdu::GetQuicCreds(codec::GetQuicCreds {}).encode_async(&mut stream, 0).await {
+                    match Pdu::GetQuicCreds(codec::GetQuicCreds {})
+                        .encode_async(&mut stream, 0)
+                        .await
+                    {
                         Ok(_) => {
                             stream.flush().await.ok();
                             // Wait for response
                             if let Ok(decoded) = Pdu::decode_async(&mut stream, None).await {
                                 if let Pdu::GetQuicCredsResponse(new_creds) = decoded.pdu {
                                     log::info!("QUIC certificates renewed");
-                                    reconnectable.quic_creds.replace((new_creds.clone(), std::time::SystemTime::now()));
+                                    reconnectable
+                                        .quic_creds
+                                        .replace((new_creds.clone(), std::time::SystemTime::now()));
                                     reconnectable.save_quic_creds_to_disk(&new_creds).ok();
                                 } else {
-                                    log::warn!("Unexpected response to GetQuicCreds renewal request");
+                                    log::warn!(
+                                        "Unexpected response to GetQuicCreds renewal request"
+                                    );
                                 }
                             }
                         }
@@ -1185,7 +1192,10 @@ impl Reconnectable {
                     )) {
                         Ok(stream) => {
                             self.stream.replace(stream);
-                            ui.output_str(&format!("QUIC Connected to {} (cached creds)!\n", remote_address));
+                            ui.output_str(&format!(
+                                "QUIC Connected to {} (cached creds)!\n",
+                                remote_address
+                            ));
                             return Ok(());
                         }
                         Err(err) => {
@@ -1213,9 +1223,13 @@ impl Reconnectable {
                         Some(&quic_client),
                     )) {
                         Ok(stream) => {
-                            self.quic_creds.replace((creds, std::time::SystemTime::now()));
+                            self.quic_creds
+                                .replace((creds, std::time::SystemTime::now()));
                             self.stream.replace(stream);
-                            ui.output_str(&format!("QUIC Connected to {} (disk creds)!\n", remote_address));
+                            ui.output_str(&format!(
+                                "QUIC Connected to {} (disk creds)!\n",
+                                remote_address
+                            ));
                             return Ok(());
                         }
                         Err(err) => {
@@ -1299,7 +1313,8 @@ impl Reconnectable {
                 ))?;
 
                 // Store credentials in memory with timestamp
-                self.quic_creds.replace((creds, std::time::SystemTime::now()));
+                self.quic_creds
+                    .replace((creds, std::time::SystemTime::now()));
                 self.stream.replace(stream);
                 ui.output_str(&format!("QUIC Connected to {}!\n", remote_address));
                 Ok(())

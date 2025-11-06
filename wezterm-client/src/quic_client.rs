@@ -3,14 +3,14 @@
 
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
+use quinn::crypto::rustls::QuicClientConfig as RustlsQuicClientConfig;
+use quinn::rustls;
 use smol::io::{AsyncRead, AsyncWrite};
 use std::convert::TryFrom;
 use std::io::Cursor;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
-use quinn::crypto::rustls::QuicClientConfig as RustlsQuicClientConfig;
-use quinn::rustls;
 
 /// Wraps a quinn bidirectional stream to implement AsyncReadAndWrite
 ///
@@ -73,7 +73,10 @@ impl AsyncWrite for QuicStream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        _cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
         // Try to finish the send stream (non-blocking operation)
         match self.send.finish() {
             Ok(()) => Poll::Ready(Ok(())),
@@ -125,8 +128,8 @@ pub async fn establish_quic_connection(
     // If the network changes (e.g., WiFi to Ethernet), Quinn will automatically validate
     // the new path and continue the connection. The enable_migration flag ensures
     // we're using the default Quinn settings that support this.
-    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)
-        .context("Failed to create QUIC endpoint")?;
+    let mut endpoint =
+        quinn::Endpoint::client("0.0.0.0:0".parse()?).context("Failed to create QUIC endpoint")?;
 
     // Build root certificate store
     let mut roots = rustls::RootCertStore::empty();
@@ -139,7 +142,8 @@ pub async fn establish_quic_connection(
             .context("Failed to parse CA certificate")?;
 
         for cert in certs {
-            roots.add(cert)
+            roots
+                .add(cert)
                 .context("Failed to add CA certificate to root store")?;
         }
     } else {
@@ -147,8 +151,7 @@ pub async fn establish_quic_connection(
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
 
-    let client_config_builder = rustls::ClientConfig::builder()
-        .with_root_certificates(roots);
+    let client_config_builder = rustls::ClientConfig::builder().with_root_certificates(roots);
 
     // If client certificate is provided, use it for mutual TLS
     if let Some(cert_pem) = client_cert_pem {
@@ -166,14 +169,11 @@ pub async fn establish_quic_connection(
             .ok_or_else(|| anyhow!("No private key found in PEM"))?;
 
         let private_key = match key_item {
-            rustls_pemfile::Item::Pkcs8Key(key) => {
-                rustls::pki_types::PrivateKeyDer::Pkcs8(key)
+            rustls_pemfile::Item::Pkcs8Key(key) => rustls::pki_types::PrivateKeyDer::Pkcs8(key),
+            rustls_pemfile::Item::Sec1Key(key) => rustls::pki_types::PrivateKeyDer::Sec1(key),
+            rustls_pemfile::Item::X509Certificate(_) => {
+                anyhow::bail!("Unsupported private key format X509Certificate")
             }
-            rustls_pemfile::Item::Sec1Key(key) => {
-                rustls::pki_types::PrivateKeyDer::Sec1(key)
-            }
-            rustls_pemfile::Item::X509Certificate(_) => 
-            anyhow::bail!("Unsupported private key format X509Certificate"),
             _ => anyhow::bail!("Unsupported private key format"),
         };
 
@@ -189,7 +189,7 @@ pub async fn establish_quic_connection(
             let mut transport = quinn::TransportConfig::default();
             transport.max_idle_timeout(Some(
                 quinn::IdleTimeout::try_from(cfg.max_idle_timeout)
-                    .context("Invalid max_idle_timeout")?
+                    .context("Invalid max_idle_timeout")?,
             ));
             client_config.transport_config(Arc::new(transport));
         }
@@ -207,7 +207,7 @@ pub async fn establish_quic_connection(
             let mut transport = quinn::TransportConfig::default();
             transport.max_idle_timeout(Some(
                 quinn::IdleTimeout::try_from(cfg.max_idle_timeout)
-                    .context("Invalid max_idle_timeout")?
+                    .context("Invalid max_idle_timeout")?,
             ));
             client_config.transport_config(Arc::new(transport));
         }

@@ -14,6 +14,7 @@ mod list;
 mod list_clients;
 mod move_pane_to_new_tab;
 mod proxy;
+mod quic_creds;
 mod rename_workspace;
 mod send_text;
 mod set_tab_title;
@@ -21,7 +22,6 @@ mod set_window_title;
 mod spawn_command;
 mod split_pane;
 mod tls_creds;
-mod quic_creds;
 mod zoom_pane;
 
 #[derive(Debug, Parser, Clone, Copy)]

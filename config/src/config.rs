@@ -15,9 +15,9 @@ use crate::keyassignment::{
 };
 use crate::keys::{Key, LeaderKey, Mouse};
 use crate::lua::make_lua_context;
+use crate::quic::{QuicDomainClient, QuicDomainServer};
 use crate::ssh::{SshBackend, SshDomain};
 use crate::tls::{TlsDomainClient, TlsDomainServer};
-use crate::quic::{QuicDomainClient, QuicDomainServer};
 use crate::units::Dimension;
 use crate::unix::UnixDomain;
 use crate::wsl::WslDomain;

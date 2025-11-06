@@ -45,7 +45,10 @@ pub fn update_mux_domains_for_server(config: &ConfigHandle) -> anyhow::Result<()
 
 fn update_mux_domains_impl(config: &ConfigHandle, is_standalone_mux: bool) -> anyhow::Result<()> {
     let mux = Mux::get();
-    log::info!("update_mux_domains_impl called, is_standalone_mux={}", is_standalone_mux);
+    log::info!(
+        "update_mux_domains_impl called, is_standalone_mux={}",
+        is_standalone_mux
+    );
 
     for client_config in client_domains(&config) {
         let domain_name = client_config.name().to_string();
