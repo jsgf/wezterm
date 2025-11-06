@@ -27,9 +27,11 @@ fn client_domains(config: &config::ConfigHandle) -> Vec<ClientDomainConfig> {
     }
 
     for quic_client in &config.quic_clients {
+        log::info!("Found QUIC client domain: {}", quic_client.name);
         domains.push(ClientDomainConfig::Quic(quic_client.clone()));
     }
 
+    log::info!("client_domains returning {} domains", domains.len());
     domains
 }
 
@@ -43,14 +45,19 @@ pub fn update_mux_domains_for_server(config: &ConfigHandle) -> anyhow::Result<()
 
 fn update_mux_domains_impl(config: &ConfigHandle, is_standalone_mux: bool) -> anyhow::Result<()> {
     let mux = Mux::get();
+    log::info!("update_mux_domains_impl called, is_standalone_mux={}", is_standalone_mux);
 
     for client_config in client_domains(&config) {
-        if mux.get_domain_by_name(client_config.name()).is_some() {
+        let domain_name = client_config.name().to_string();
+        if mux.get_domain_by_name(&domain_name).is_some() {
+            log::info!("Domain {} already registered, skipping", domain_name);
             continue;
         }
 
+        log::info!("Registering client domain: {}", domain_name);
         let domain: Arc<dyn Domain> = Arc::new(ClientDomain::new(client_config));
         mux.add_domain(&domain);
+        log::info!("Successfully registered domain: {}", domain_name);
     }
 
     for ssh_dom in config.ssh_domains().into_iter() {

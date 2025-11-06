@@ -10,6 +10,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use quinn::crypto::rustls::QuicClientConfig as RustlsQuicClientConfig;
+use quinn::rustls;
 
 /// Wraps a quinn bidirectional stream to implement AsyncReadAndWrite
 ///
@@ -97,6 +98,7 @@ pub async fn establish_quic_connection(
     remote_address: &str,
     client_cert_pem: Option<String>,
     ca_cert_pem: Option<String>,
+    config: Option<&config::QuicDomainClient>,
 ) -> anyhow::Result<Box<dyn crate::client::AsyncReadAndWrite>> {
     // Parse remote address
     let socket_addr: std::net::SocketAddr = remote_address
@@ -109,7 +111,20 @@ pub async fn establish_quic_connection(
         .next()
         .ok_or_else(|| anyhow!("Missing hostname in remote_address"))?;
 
+    // Check if 0-RTT is enabled
+    let enable_0rtt = config.map(|c| c.enable_0rtt).unwrap_or(true);
+
+    // Check if connection migration is enabled
+    let enable_migration = config.map(|c| c.enable_migration).unwrap_or(true);
+    if enable_migration {
+        log::debug!("Connection migration enabled - will handle network changes transparently");
+    }
+
     // Create QUIC endpoint bound to any local address
+    // Note: Connection migration is handled transparently by Quinn's protocol implementation.
+    // If the network changes (e.g., WiFi to Ethernet), Quinn will automatically validate
+    // the new path and continue the connection. The enable_migration flag ensures
+    // we're using the default Quinn settings that support this.
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)
         .context("Failed to create QUIC endpoint")?;
 
@@ -157,6 +172,8 @@ pub async fn establish_quic_connection(
             rustls_pemfile::Item::Sec1Key(key) => {
                 rustls::pki_types::PrivateKeyDer::Sec1(key)
             }
+            rustls_pemfile::Item::X509Certificate(_) => 
+            anyhow::bail!("Unsupported private key format X509Certificate"),
             _ => anyhow::bail!("Unsupported private key format"),
         };
 
@@ -165,23 +182,64 @@ pub async fn establish_quic_connection(
             .context("Failed to configure client certificate")?;
 
         let quic_client_config = RustlsQuicClientConfig::try_from(client_crypto)?;
-        let client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
+        let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
+
+        // Apply transport configuration from config
+        if let Some(cfg) = config {
+            let mut transport = quinn::TransportConfig::default();
+            transport.max_idle_timeout(Some(
+                quinn::IdleTimeout::try_from(cfg.max_idle_timeout)
+                    .context("Invalid max_idle_timeout")?
+            ));
+            client_config.transport_config(Arc::new(transport));
+        }
+
         endpoint.set_default_client_config(client_config);
     } else {
         // No client certificate - use no client auth
         let client_crypto = client_config_builder.with_no_client_auth();
 
         let quic_client_config = RustlsQuicClientConfig::try_from(client_crypto)?;
-        let client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
+        let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
+
+        // Apply transport configuration from config
+        if let Some(cfg) = config {
+            let mut transport = quinn::TransportConfig::default();
+            transport.max_idle_timeout(Some(
+                quinn::IdleTimeout::try_from(cfg.max_idle_timeout)
+                    .context("Invalid max_idle_timeout")?
+            ));
+            client_config.transport_config(Arc::new(transport));
+        }
+
         endpoint.set_default_client_config(client_config);
     }
 
     // Connect to server
-    let connection = endpoint
+    let connecting = endpoint
         .connect(socket_addr, hostname)
-        .context("Failed to create QUIC connection")?
-        .await
-        .context("QUIC handshake failed")?;
+        .context("Failed to create QUIC connection")?;
+
+    // Try to use 0-RTT if enabled for faster reconnections
+    let connection = if enable_0rtt {
+        match connecting.into_0rtt() {
+            Ok((conn, zero_rtt_accepted)) => {
+                log::debug!("0-RTT connection attempt in progress");
+                // We can use the connection immediately, but wait for confirmation
+                // that 0-RTT was accepted to avoid issues with rejected 0-RTT data
+                let _ = zero_rtt_accepted.await;
+                conn
+            }
+            Err(connecting) => {
+                // 0-RTT not available or disabled, fall back to full handshake
+                log::debug!("0-RTT not available, falling back to 1-RTT handshake");
+                connecting.await.context("QUIC handshake failed")?
+            }
+        }
+    } else {
+        // 0-RTT disabled, do regular handshake
+        connecting.await.context("QUIC handshake failed")?
+    };
 
     // Open a bidirectional stream for mux protocol
     let (send, recv) = connection

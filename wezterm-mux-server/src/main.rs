@@ -262,6 +262,17 @@ async fn async_run(cmd: Option<CommandBuilder>) -> anyhow::Result<()> {
     let mux = Mux::get();
     let config = config::configuration();
 
+    log::info!("Config loaded: quic_clients count = {}, quic_servers count = {}, unix_domains count = {}, tls_clients count = {}",
+        config.quic_clients.len(), config.quic_servers.len(), config.unix_domains.len(), config.tls_clients.len());
+
+    for quic_server in &config.quic_servers {
+        log::info!("QUIC server found in config: {}", quic_server.bind_address);
+    }
+
+    for quic in &config.quic_clients {
+        log::info!("QUIC client found in config: {}", quic.name);
+    }
+
     update_mux_domains_for_server(&config)?;
     let _config_subscription = config::subscribe_to_config_reload(move || {
         promise::spawn::spawn_into_main_thread(async move {

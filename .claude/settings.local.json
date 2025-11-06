@@ -6,7 +6,18 @@
       "Bash(cargo test:*)",
       "Bash(cargo tree:*)",
       "Bash(cargo metadata:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(WEZTERM_CONFIG_DIR=\"/tmp/wezterm-quic-test/config\" XDG_DATA_HOME=\"/tmp/wezterm-quic-test/data/share\" HOME=\"/tmp/wezterm-quic-test/data\" /home/jeremy/git/wezterm/target/release/wezterm connect:*)",
+      "Bash(WEZTERM_CONFIG_DIR=\"/tmp/wezterm-quic-test/config\" XDG_DATA_HOME=\"/tmp/wezterm-quic-test/data/share\" HOME=\"/tmp/wezterm-quic-test/data\" /home/jeremy/git/wezterm/target/release/wezterm:*)",
+      "Bash(/home/jeremy/git/wezterm/target/release/wezterm:*)",
+      "Bash(WEZTERM_CONFIG_DIR=\"/tmp/wezterm-quic-test/config\" XDG_DATA_HOME=\"/tmp/wezterm-quic-test/data/share\" HOME=\"/tmp/wezterm-quic-test/data\" /home/jeremy/git/wezterm/target/release/wezterm cli:*)",
+      "Bash(__NEW_LINE__ cargo clean -p config -p wezterm-mux-server-impl -p wezterm-mux-server cargo build --features quic --release -p wezterm-mux-server)",
+      "Bash(__NEW_LINE__ touch /home/jeremy/git/wezterm/wezterm-mux-server/src/main.rs cargo build --features quic --release -p wezterm-mux-server)",
+      "Bash(__NEW_LINE__ touch /home/jeremy/git/wezterm/wezterm-mux-server/src/main.rs)",
+      "Bash(__NEW_LINE__ export TEST_DIR=/tmp/wezterm-quic-test export CONFIG_DIR=$TEST_DIR/config export DATA_DIR=$TEST_DIR/data)",
+      "Bash(killall:*)",
+      "Bash(RUST_LOG=info WEZTERM_CONFIG_DIR=$CONFIG_DIR XDG_DATA_HOME=$DATA_DIR/share HOME=$DATA_DIR timeout 3 /home/jeremy/git/wezterm/target/release/wezterm-mux-server:*)",
+      "Bash(__NEW_LINE__ /home/jeremy/git/wezterm/target/release/wezterm-mux-server --help)"
     ],
     "deny": [],
     "ask": []

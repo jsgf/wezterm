@@ -646,7 +646,7 @@ pub struct GetTlsCredsResponse {
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
 pub struct GetQuicCreds {}
 
-#[derive(Deserialize, Serialize, PartialEq, Debug)]
+#[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
 pub struct GetQuicCredsResponse {
     /// The signing certificate
     pub ca_cert_pem: String,

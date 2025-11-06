@@ -49,6 +49,7 @@ enum ReaderMessage {
         promise: Sender<anyhow::Result<Pdu>>,
     },
     Readable,
+    CheckRenewal,
 }
 
 #[derive(Clone)]
@@ -375,14 +376,19 @@ async fn client_thread_async(
     };
 
     let mut stream = reconnectable.take_stream().unwrap();
+    let mut renewal_check_timer = smol::Timer::after(std::time::Duration::from_secs(60));
 
     loop {
         let rx_msg = rx.recv();
         let wait_for_read = stream
             .wait_for_readable()
             .map(|_| Ok(ReaderMessage::Readable));
+        let renewal_timeout = async {
+            (&mut renewal_check_timer).await;
+            Ok::<ReaderMessage, smol::channel::RecvError>(ReaderMessage::CheckRenewal)
+        };
 
-        match smol::future::or(rx_msg, wait_for_read).await {
+        match smol::future::or(smol::future::or(rx_msg, wait_for_read), renewal_timeout).await {
             Ok(ReaderMessage::SendPdu { pdu, promise }) => {
                 let serial = next_serial;
                 next_serial += 1;
@@ -426,6 +432,33 @@ async fn client_thread_async(
                         return Err(err).context("Error while decoding response pdu");
                     }
                 }
+            }
+            Ok(ReaderMessage::CheckRenewal) => {
+                // Check if QUIC certificates need renewal
+                if reconnectable.should_renew_quic_cert() {
+                    log::info!("QUIC certificate approaching expiry, attempting renewal");
+                    // Try to renew by sending GetQuicCreds request
+                    match Pdu::GetQuicCreds(codec::GetQuicCreds {}).encode_async(&mut stream, 0).await {
+                        Ok(_) => {
+                            stream.flush().await.ok();
+                            // Wait for response
+                            if let Ok(decoded) = Pdu::decode_async(&mut stream, None).await {
+                                if let Pdu::GetQuicCredsResponse(new_creds) = decoded.pdu {
+                                    log::info!("QUIC certificates renewed");
+                                    reconnectable.quic_creds.replace((new_creds.clone(), std::time::SystemTime::now()));
+                                    reconnectable.save_quic_creds_to_disk(&new_creds).ok();
+                                } else {
+                                    log::warn!("Unexpected response to GetQuicCreds renewal request");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to send GetQuicCreds for renewal: {}", e);
+                        }
+                    }
+                }
+                // Reset the renewal timer for the next check (check every 60 seconds)
+                renewal_check_timer = smol::Timer::after(std::time::Duration::from_secs(60));
             }
             Err(_) => {
                 return Err(NotReconnectableError::ClientWasDestroyed.into());
@@ -540,6 +573,7 @@ struct Reconnectable {
     config: ClientDomainConfig,
     stream: Option<Box<dyn AsyncReadAndWrite>>,
     tls_creds: Option<GetTlsCredsResponse>,
+    quic_creds: Option<(GetQuicCredsResponse, std::time::SystemTime)>,
 }
 
 struct SshStream {
@@ -604,6 +638,7 @@ impl Reconnectable {
             config,
             stream,
             tls_creds: None,
+            quic_creds: None,
         }
     }
 
@@ -619,6 +654,90 @@ impl Reconnectable {
 
     fn tls_creds_cert_path(&self) -> anyhow::Result<PathBuf> {
         Ok(self.tls_creds_path()?.join("cert.pem"))
+    }
+
+    fn quic_creds_path(&self) -> anyhow::Result<PathBuf> {
+        let path = config::pki_dir()?.join(self.config.name()).join("quic");
+        std::fs::create_dir_all(&path)?;
+        Ok(path)
+    }
+
+    fn quic_creds_ca_path(&self) -> anyhow::Result<PathBuf> {
+        Ok(self.quic_creds_path()?.join("ca.pem"))
+    }
+
+    fn quic_creds_cert_path(&self) -> anyhow::Result<PathBuf> {
+        Ok(self.quic_creds_path()?.join("cert.pem"))
+    }
+
+    fn load_quic_creds_from_disk(&mut self) -> anyhow::Result<Option<GetQuicCredsResponse>> {
+        if let ClientDomainConfig::Quic(quic_client) = &self.config {
+            if !quic_client.persist_to_disk {
+                return Ok(None);
+            }
+        } else {
+            return Ok(None);
+        }
+
+        let ca_path = self.quic_creds_ca_path()?;
+        let cert_path = self.quic_creds_cert_path()?;
+
+        if !ca_path.exists() || !cert_path.exists() {
+            return Ok(None);
+        }
+
+        let ca_cert_pem = std::fs::read_to_string(&ca_path)?;
+        let client_cert_pem = std::fs::read_to_string(&cert_path)?;
+
+        Ok(Some(GetQuicCredsResponse {
+            ca_cert_pem,
+            client_cert_pem,
+        }))
+    }
+
+    fn save_quic_creds_to_disk(&self, creds: &GetQuicCredsResponse) -> anyhow::Result<()> {
+        if let ClientDomainConfig::Quic(quic_client) = &self.config {
+            if !quic_client.persist_to_disk {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
+
+        let ca_path = self.quic_creds_ca_path()?;
+        let cert_path = self.quic_creds_cert_path()?;
+
+        std::fs::write(&ca_path, creds.ca_cert_pem.as_bytes())?;
+        std::fs::write(&cert_path, creds.client_cert_pem.as_bytes())?;
+
+        Ok(())
+    }
+
+    fn is_quic_cert_expired(&self) -> bool {
+        if let Some((_, obtained_at)) = &self.quic_creds {
+            if let ClientDomainConfig::Quic(quic_client) = &self.config {
+                let cert_lifetime_secs = (quic_client.certificate_lifetime_days as u64) * 86400;
+                if let Ok(elapsed) = obtained_at.elapsed() {
+                    // Cert is expired if we've passed the lifetime
+                    return elapsed.as_secs() >= cert_lifetime_secs;
+                }
+            }
+        }
+        false
+    }
+
+    fn should_renew_quic_cert(&self) -> bool {
+        if let Some((_, obtained_at)) = &self.quic_creds {
+            if let ClientDomainConfig::Quic(quic_client) = &self.config {
+                let cert_lifetime_secs = (quic_client.certificate_lifetime_days as u64) * 86400;
+                // Trigger renewal at 80% of lifetime
+                let renewal_threshold = (cert_lifetime_secs as f64 * 0.8) as u64;
+                if let Ok(elapsed) = obtained_at.elapsed() {
+                    return elapsed.as_secs() >= renewal_threshold;
+                }
+            }
+        }
+        false
     }
 
     fn take_stream(&mut self) -> Option<Box<dyn AsyncReadAndWrite>> {
@@ -1050,16 +1169,58 @@ impl Reconnectable {
 
             let remote_address = &quic_client.remote_address;
 
-            // Try to connect directly with cached certificates if available
-            if quic_client.ssh_parameters().is_some() {
-                match block_on(quic_client::establish_quic_connection(&remote_address, None, None)) {
-                    Ok(stream) => {
-                        self.stream.replace(stream);
-                        ui.output_str(&format!("QUIC Connected to {}!\n", remote_address));
-                        return Ok(());
+            // Check if we have cached credentials in memory
+            let has_cached_creds = self.quic_creds.is_some();
+            let certs_expired = self.is_quic_cert_expired();
+
+            // If we have cached credentials and they're not expired, try to use them
+            if has_cached_creds && !certs_expired {
+                if let Some((creds, _)) = &self.quic_creds {
+                    log::debug!("Trying direct QUIC connection with cached credentials");
+                    match block_on(quic_client::establish_quic_connection(
+                        &remote_address,
+                        Some(creds.client_cert_pem.clone()),
+                        Some(creds.ca_cert_pem.clone()),
+                        Some(&quic_client),
+                    )) {
+                        Ok(stream) => {
+                            self.stream.replace(stream);
+                            ui.output_str(&format!("QUIC Connected to {} (cached creds)!\n", remote_address));
+                            return Ok(());
+                        }
+                        Err(err) => {
+                            log::debug!("Direct QUIC connect with cached creds failed: {}", err);
+                            // Fall through to SSH bootstrap
+                        }
                     }
-                    Err(err) => {
-                        log::debug!("Direct QUIC connect failed, will try SSH bootstrap: {}", err);
+                }
+            }
+
+            // If certificates expired, log it
+            if certs_expired {
+                log::info!("QUIC certificates expired, need to refresh via SSH");
+                ui.output_str("QUIC certificates have expired, refreshing via SSH...\n");
+            }
+
+            // Try to load credentials from disk if persist_to_disk is set
+            if !has_cached_creds && !certs_expired {
+                if let Ok(Some(creds)) = self.load_quic_creds_from_disk() {
+                    log::debug!("Loaded QUIC credentials from disk, trying direct connection");
+                    match block_on(quic_client::establish_quic_connection(
+                        &remote_address,
+                        Some(creds.client_cert_pem.clone()),
+                        Some(creds.ca_cert_pem.clone()),
+                        Some(&quic_client),
+                    )) {
+                        Ok(stream) => {
+                            self.quic_creds.replace((creds, std::time::SystemTime::now()));
+                            self.stream.replace(stream);
+                            ui.output_str(&format!("QUIC Connected to {} (disk creds)!\n", remote_address));
+                            return Ok(());
+                        }
+                        Err(err) => {
+                            log::debug!("Direct QUIC connect with disk creds failed: {}", err);
+                        }
                     }
                 }
             }
@@ -1126,13 +1287,19 @@ impl Reconnectable {
                     Ok(creds)
                 })?;
 
+                // Save to disk if configured
+                self.save_quic_creds_to_disk(&creds)?;
+
                 // Now connect with the obtained credentials
                 let stream = block_on(quic_client::establish_quic_connection(
                     &remote_address,
-                    Some(creds.client_cert_pem),
-                    Some(creds.ca_cert_pem),
+                    Some(creds.client_cert_pem.clone()),
+                    Some(creds.ca_cert_pem.clone()),
+                    Some(&quic_client),
                 ))?;
 
+                // Store credentials in memory with timestamp
+                self.quic_creds.replace((creds, std::time::SystemTime::now()));
                 self.stream.replace(stream);
                 ui.output_str(&format!("QUIC Connected to {}!\n", remote_address));
                 Ok(())

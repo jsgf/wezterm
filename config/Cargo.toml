@@ -13,7 +13,7 @@ env_logger.workspace = true
 [features]
 default = []
 distro-defaults = []
-quic = ["quinn", "rustls", "ring", "rcgen"]
+quic = ["quinn", "rcgen"]
 
 [dependencies]
 anyhow.workspace = true
@@ -45,8 +45,6 @@ wezterm-input-types.workspace = true
 wezterm-ssh.workspace = true
 wezterm-term = { workspace = true, features=["use_serde"] }
 quinn = { workspace = true, optional = true, features = ["runtime-smol", "rustls-ring", "platform-verifier"] }
-rustls = { workspace = true, optional = true }
-ring = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
 
 [target."cfg(unix)".dependencies]

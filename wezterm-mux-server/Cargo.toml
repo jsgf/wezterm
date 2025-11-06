@@ -28,7 +28,6 @@ wezterm-mux-server-impl.workspace = true
 wezterm-gui-subcommands.workspace = true
 wezterm-term.workspace = true
 quinn = { workspace = true, optional = true }
-rustls = { workspace = true, optional = true }
 quinn-proto = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
 wezterm-client = { workspace = true, optional = true }
@@ -37,7 +36,7 @@ smol = { workspace = true, optional = true }
 futures-lite = { workspace = true, optional = true }
 
 [features]
-quic = ["quinn", "rustls", "quinn-proto", "webpki-roots", "wezterm-client", "rustls-pemfile", "smol", "futures-lite"]
+quic = ["quinn", "quinn-proto", "webpki-roots", "wezterm-client", "rustls-pemfile", "smol", "futures-lite", "config/quic", "wezterm-mux-server-impl/quic"]
 
 [target."cfg(windows)".dependencies]
 winapi = { workspace=true, features = [ "winuser" ]}

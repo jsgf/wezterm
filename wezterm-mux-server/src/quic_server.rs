@@ -10,6 +10,8 @@ use std::convert::TryFrom;
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
 use smol::io::{AsyncRead, AsyncWrite};
+use quinn::rustls;
+
 /// Wraps QUIC streams to implement AsyncRead/AsyncWrite
 #[derive(Debug)]
 pub struct QuicStream {
@@ -126,11 +128,10 @@ pub fn spawn_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
     log::info!("QUIC server configured to listen on {}", listen_addr);
 
     // Clone config for the thread
-    let bind_address = quic_server.bind_address.clone();
-    let cert_lifetime_days = quic_server.certificate_lifetime_days;
+    let quic_server = quic_server.clone();
 
     std::thread::spawn(move || {
-        if let Err(e) = run_quic_listener(&bind_address, cert_lifetime_days) {
+        if let Err(e) = run_quic_listener(&quic_server) {
             log::error!("QUIC listener error: {}", e);
         }
     });
@@ -138,11 +139,11 @@ pub fn spawn_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
     Ok(())
 }
 
-fn run_quic_listener(bind_address: &str, cert_lifetime_days: u32) -> anyhow::Result<()> {
-    let listen_addr: std::net::SocketAddr = bind_address.parse()?;
+fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()> {
+    let listen_addr: std::net::SocketAddr = quic_server.bind_address.parse()?;
 
     // Initialize PKI with configured certificate lifetime
-    let pki = wezterm_mux_server_impl::pki::Pki::init_with_lifetime(cert_lifetime_days)?;
+    let pki = wezterm_mux_server_impl::pki::Pki::init_with_lifetime(quic_server.certificate_lifetime_days)?;
 
     // Load server certificate and key
     let cert_path = pki.server_pem();
@@ -196,9 +197,20 @@ fn run_quic_listener(bind_address: &str, cert_lifetime_days: u32) -> anyhow::Res
         .context("building server config")?;
 
     // Create Quinn ServerConfig from rustls
-    let quinn_config = quinn::crypto::rustls::QuicServerConfig::try_from(server_config)
+    let quinn_crypto_config = quinn::crypto::rustls::QuicServerConfig::try_from(server_config)
         .context("converting to QUIC config")?;
-    let quinn_config = quinn::ServerConfig::with_crypto(Arc::new(quinn_config));
+    let mut quinn_config = quinn::ServerConfig::with_crypto(Arc::new(quinn_crypto_config));
+
+    // Apply transport configuration from config
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(
+        quinn::IdleTimeout::try_from(quic_server.max_idle_timeout)
+            .context("Invalid max_idle_timeout")?
+    ));
+    if let Some(keep_alive) = quic_server.keep_alive_interval {
+        transport.keep_alive_interval(Some(keep_alive));
+    }
+    quinn_config.transport_config(Arc::new(transport));
 
     // Bind UDP socket
     let socket = std::net::UdpSocket::bind(listen_addr)
