@@ -230,10 +230,12 @@ fn run() -> anyhow::Result<()> {
 
     let executor = promise::spawn::SimpleExecutor::new();
 
+    log::info!("About to call spawn_listener()");
     spawn_listener().map_err(|e| {
         log::error!("problem spawning listeners: {:?}", e);
         e
     })?;
+    log::info!("spawn_listener() completed successfully");
 
     let activity = Activity::new();
 
@@ -322,6 +324,9 @@ mod quic_server;
 
 pub fn spawn_listener() -> anyhow::Result<()> {
     let config = configuration();
+    log::info!("spawn_listener called: {} unix domains, {} tls servers, {} quic servers",
+        config.unix_domains.len(), config.tls_servers.len(), config.quic_servers.len());
+
     for unix_dom in &config.unix_domains {
         std::env::set_var("WEZTERM_UNIX_SOCKET", unix_dom.socket_path());
         let mut listener = wezterm_mux_server_impl::local::LocalListener::with_domain(unix_dom)?;
@@ -336,9 +341,16 @@ pub fn spawn_listener() -> anyhow::Result<()> {
 
     #[cfg(feature = "quic")]
     {
-        for quic_server in &config.quic_servers {
+        log::info!("QUIC feature is enabled, spawning {} QUIC listeners", config.quic_servers.len());
+        for (idx, quic_server) in config.quic_servers.iter().enumerate() {
+            log::info!("Spawning QUIC listener {}: {}", idx, quic_server.bind_address);
             quic_server::spawn_quic_listener(quic_server)?;
         }
+    }
+
+    #[cfg(not(feature = "quic"))]
+    {
+        log::warn!("QUIC feature is NOT enabled");
     }
 
     Ok(())

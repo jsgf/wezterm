@@ -103,16 +103,21 @@ pub async fn establish_quic_connection(
     ca_cert_pem: Option<String>,
     config: Option<&config::QuicDomainClient>,
 ) -> anyhow::Result<Box<dyn crate::client::AsyncReadAndWrite>> {
-    // Parse remote address
-    let socket_addr: std::net::SocketAddr = remote_address
-        .parse()
-        .context("Invalid remote address format (expected host:port)")?;
+    use std::net::ToSocketAddrs;
 
     // Extract hostname for SNI
     let hostname = remote_address
         .split(':')
         .next()
         .ok_or_else(|| anyhow!("Missing hostname in remote_address"))?;
+
+    // Resolve hostname to socket address (handles both IPs and domain names)
+    // This mirrors what TcpStream::connect does
+    let socket_addr: std::net::SocketAddr = remote_address
+        .to_socket_addrs()
+        .context(format!("Failed to resolve address: {}", remote_address))?
+        .next()
+        .ok_or_else(|| anyhow!("No addresses found for {}", remote_address))?;
 
     // Check if 0-RTT is enabled
     let enable_0rtt = config.map(|c| c.enable_0rtt).unwrap_or(true);
@@ -129,7 +134,7 @@ pub async fn establish_quic_connection(
     // the new path and continue the connection. The enable_migration flag ensures
     // we're using the default Quinn settings that support this.
     let mut endpoint =
-        quinn::Endpoint::client("0.0.0.0:0".parse()?).context("Failed to create QUIC endpoint")?;
+        quinn::Endpoint::client("[::]:0".parse()?).context("Failed to create QUIC endpoint")?;
 
     // Build root certificate store
     let mut roots = rustls::RootCertStore::empty();
@@ -151,8 +156,6 @@ pub async fn establish_quic_connection(
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
 
-    let client_config_builder = rustls::ClientConfig::builder().with_root_certificates(roots);
-
     // If client certificate is provided, use it for mutual TLS
     if let Some(cert_pem) = client_cert_pem {
         let mut cert_cursor = Cursor::new(cert_pem.as_bytes());
@@ -162,23 +165,48 @@ pub async fn establish_quic_connection(
             .collect::<Result<Vec<_>, _>>()
             .context("Failed to parse client certificate")?;
 
-        // Extract private key - reset cursor and read again for key extraction
+        if certs.is_empty() {
+            anyhow::bail!("No certificates found in PEM");
+        }
+
+        // Extract private key by reading all PEM items and finding the key
         let mut key_cursor = Cursor::new(cert_pem.as_bytes());
-        let key_item = rustls_pemfile::read_one(&mut key_cursor)
-            .context("Failed to read private key")?
-            .ok_or_else(|| anyhow!("No private key found in PEM"))?;
+        let mut private_key: Option<rustls::pki_types::PrivateKeyDer> = None;
 
-        let private_key = match key_item {
-            rustls_pemfile::Item::Pkcs8Key(key) => rustls::pki_types::PrivateKeyDer::Pkcs8(key),
-            rustls_pemfile::Item::Sec1Key(key) => rustls::pki_types::PrivateKeyDer::Sec1(key),
-            rustls_pemfile::Item::X509Certificate(_) => {
-                anyhow::bail!("Unsupported private key format X509Certificate")
+        loop {
+            match rustls_pemfile::read_one(&mut key_cursor) {
+                Ok(Some(item)) => {
+                    match item {
+                        rustls_pemfile::Item::Pkcs8Key(key) => {
+                            private_key = Some(rustls::pki_types::PrivateKeyDer::Pkcs8(key));
+                            break;
+                        }
+                        rustls_pemfile::Item::Sec1Key(key) => {
+                            private_key = Some(rustls::pki_types::PrivateKeyDer::Sec1(key));
+                            break;
+                        }
+                        rustls_pemfile::Item::X509Certificate(_) => {
+                            // Skip certificates, we already have them
+                            continue;
+                        }
+                        _ => {
+                            // Skip other items
+                            continue;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    anyhow::bail!("Failed to read private key from PEM: {}", e);
+                }
             }
-            _ => anyhow::bail!("Unsupported private key format"),
-        };
+        }
 
-        let client_crypto = client_config_builder
-            .with_client_auth_cert(certs, private_key)
+        let private_key = private_key.ok_or_else(|| anyhow!("No private key found in PEM"))?;
+
+        // Use the CA from quiccreds to verify the server's certificate
+        let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
+        let client_crypto = builder.with_client_auth_cert(certs, private_key)
             .context("Failed to configure client certificate")?;
 
         let quic_client_config = RustlsQuicClientConfig::try_from(client_crypto)?;
@@ -197,7 +225,9 @@ pub async fn establish_quic_connection(
         endpoint.set_default_client_config(client_config);
     } else {
         // No client certificate - use no client auth
-        let client_crypto = client_config_builder.with_no_client_auth();
+        let client_crypto = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
 
         let quic_client_config = RustlsQuicClientConfig::try_from(client_crypto)?;
         let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
@@ -216,36 +246,43 @@ pub async fn establish_quic_connection(
     }
 
     // Connect to server
+    log::info!("QUIC: Initiating connection to {} (hostname: {})", socket_addr, hostname);
     let connecting = endpoint
         .connect(socket_addr, hostname)
         .context("Failed to create QUIC connection")?;
 
     // Try to use 0-RTT if enabled for faster reconnections
     let connection = if enable_0rtt {
+        log::info!("QUIC: Attempting 0-RTT connection");
         match connecting.into_0rtt() {
             Ok((conn, zero_rtt_accepted)) => {
-                log::debug!("0-RTT connection attempt in progress");
+                log::info!("QUIC: 0-RTT connection established, waiting for acceptance");
                 // We can use the connection immediately, but wait for confirmation
                 // that 0-RTT was accepted to avoid issues with rejected 0-RTT data
                 let _ = zero_rtt_accepted.await;
+                log::info!("QUIC: 0-RTT accepted");
                 conn
             }
             Err(connecting) => {
                 // 0-RTT not available or disabled, fall back to full handshake
-                log::debug!("0-RTT not available, falling back to 1-RTT handshake");
+                log::info!("QUIC: 0-RTT not available, falling back to 1-RTT handshake");
                 connecting.await.context("QUIC handshake failed")?
             }
         }
     } else {
         // 0-RTT disabled, do regular handshake
+        log::info!("QUIC: 0-RTT disabled, performing 1-RTT handshake");
         connecting.await.context("QUIC handshake failed")?
     };
 
+    log::info!("QUIC: Connection established, opening bidirectional stream");
     // Open a bidirectional stream for mux protocol
     let (send, recv) = connection
         .open_bi()
         .await
         .context("Failed to open QUIC stream")?;
+
+    log::info!("QUIC: Stream opened successfully");
 
     let stream = Box::new(QuicStream::new(send, recv));
     Ok(stream)

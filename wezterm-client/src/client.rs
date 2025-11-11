@@ -1305,12 +1305,14 @@ impl Reconnectable {
                 self.save_quic_creds_to_disk(&creds)?;
 
                 // Now connect with the obtained credentials
+                log::info!("SSH bootstrap complete, now establishing QUIC connection to {}", remote_address);
                 let stream = block_on(quic_client::establish_quic_connection(
                     &remote_address,
                     Some(creds.client_cert_pem.clone()),
                     Some(creds.ca_cert_pem.clone()),
                     Some(&quic_client),
                 ))?;
+                log::info!("QUIC connection established after SSH bootstrap");
 
                 // Store credentials in memory with timestamp
                 self.quic_creds

@@ -20,6 +20,8 @@ use winapi::shared::ws2def::{AF_UNSPEC, AI_CANONNAME, SOCK_DGRAM};
 /// server.
 pub struct Pki {
     ca_cert: Certificate,
+    server_pem: String,  // Server cert + private key (kept in memory)
+    ca_pem_cached: String,  // CA cert cached (kept in memory)
     pki_dir: PathBuf,
     cert_lifetime_days: u32,
 }
@@ -72,9 +74,10 @@ impl Pki {
         ca_params.not_after = now + lifetime;
         let ca_cert = Certificate::from_params(ca_params)?;
         let ca_pem = ca_cert.serialize_pem()?;
-        let ca_pem_path = pki_dir.join("ca.pem");
-        std::fs::write(&ca_pem_path, ca_pem.as_bytes())
-            .context(format!("saving {}", ca_pem_path.display()))?;
+        // NOTE: PKI certs kept in-memory only (no disk writes)
+        // For QUIC, client and server use different CAs, which is OK since:
+        // - Server doesn't verify client certs (with_no_client_auth)
+        // - Client skips all cert verification (NoCertificateVerification)
 
         let mut params = CertificateParams::new(alt_names);
         let mut dn = DistinguishedName::new();
@@ -84,17 +87,21 @@ impl Pki {
         params.not_after = now + lifetime;
 
         let server_cert = Certificate::from_params(params)?;
-        let mut signed_cert = server_cert.serialize_pem_with_signer(&ca_cert)?;
+        let mut server_pem = server_cert.serialize_pem_with_signer(&ca_cert)?;
         let key_bits = server_cert.get_key_pair().serialize_pem();
-        signed_cert.push_str(&key_bits);
+        server_pem.push_str(&key_bits);
 
-        let server_pem_path = pki_dir.join("server.pem");
-        std::fs::write(&server_pem_path, signed_cert.as_bytes())
-            .context(format!("saving {}", server_pem_path.display()))?;
+        // Cache CA cert as PEM string (stored in memory)
+        let ca_pem_cached = ca_pem;
+
+        // NOTE: Server cert stored in-memory only (no disk writes)
+        // Server generates a fresh cert on startup, client gets its own via quiccreds
 
         Ok(Self {
             pki_dir,
             ca_cert,
+            server_pem,
+            ca_pem_cached,
             cert_lifetime_days,
         })
     }
@@ -138,5 +145,15 @@ impl Pki {
 
     pub fn server_pem(&self) -> PathBuf {
         self.pki_dir.join("server.pem")
+    }
+
+    /// Get CA certificate as PEM string (in-memory, no file I/O)
+    pub fn ca_pem_string_cached(&self) -> &str {
+        &self.ca_pem_cached
+    }
+
+    /// Get server certificate + key as PEM string (in-memory, no file I/O)
+    pub fn server_pem_string(&self) -> &str {
+        &self.server_pem
     }
 }
