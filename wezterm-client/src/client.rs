@@ -1180,22 +1180,6 @@ impl Reconnectable {
                 ui.output_str("QUIC certificates have expired, refreshing via SSH...\n");
             }
 
-            // Try to load credentials from disk if persist_to_disk is set
-            if !has_cached_creds && !certs_expired {
-                if let Ok(Some(creds)) = self.load_quic_creds_from_disk() {
-                    log::debug!("Loaded QUIC credentials from disk, trying direct connection");
-                    if self.try_quic_connect(&remote_address, &creds, &quic_client, "disk creds").is_ok() {
-                        self.quic_creds
-                            .replace((creds, std::time::SystemTime::now()));
-                        ui.output_str(&format!(
-                            "QUIC Connected to {} (disk creds)!\n",
-                            remote_address
-                        ));
-                        return Ok(());
-                    }
-                }
-            }
-
             // SSH bootstrap for certificate exchange
             if let Some(Ok(ssh_params)) = quic_client.ssh_parameters() {
                 ui.output_str("Bootstrapping QUIC credentials via SSH...\n");
@@ -1241,7 +1225,22 @@ impl Reconnectable {
                 ui.output_str(&format!("QUIC Connected to {}!\n", remote_address));
                 Ok(())
             } else {
-                bail!("No SSH bootstrap configured for QUIC domain");
+                // No SSH bootstrap - try to load credentials from disk if persist_to_disk is set
+                if !has_cached_creds && !certs_expired {
+                    if let Ok(Some(creds)) = self.load_quic_creds_from_disk() {
+                        log::debug!("Loaded QUIC credentials from disk, trying direct connection");
+                        if self.try_quic_connect(&remote_address, &creds, &quic_client, "disk creds").is_ok() {
+                            self.quic_creds
+                                .replace((creds, std::time::SystemTime::now()));
+                            ui.output_str(&format!(
+                                "QUIC Connected to {} (disk creds)!\n",
+                                remote_address
+                            ));
+                            return Ok(());
+                        }
+                    }
+                }
+                bail!("No SSH bootstrap configured and no usable QUIC credentials found");
             }
         }
         #[cfg(not(feature = "quic"))]
