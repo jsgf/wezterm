@@ -19,4 +19,5 @@ echo "Data: $DATA_DIR"
 RELEASE=""
 
 cargo build --features quic $RELEASE -p wezterm-gui
-WEZTERM_LOG=wezterm_client=debug cargo run --features quic $RELEASE -p wezterm -- --config-file "$CONFIG_DIR/wezterm.lua" connect quic_test
+# export WEZTERM_LOG=wezterm_client=debug
+cargo run --features quic $RELEASE -p wezterm -- --config-file "$CONFIG_DIR/wezterm.lua" connect quic_test

@@ -91,6 +91,91 @@ impl AsyncWrite for QuicStream {
 #[async_trait(?Send)]
 impl crate::client::AsyncReadAndWrite for QuicStream {}
 
+/// Configure QUIC transport parameters
+fn configure_transport(
+    config: Option<&config::QuicDomainClient>,
+) -> Option<Arc<quinn::TransportConfig>> {
+    if let Some(cfg) = config {
+        let mut transport = quinn::TransportConfig::default();
+        if let Ok(idle_timeout) = quinn::IdleTimeout::try_from(cfg.max_idle_timeout) {
+            transport.max_idle_timeout(Some(idle_timeout));
+        }
+        // Default keep_alive_interval to half of max_idle_timeout if not explicitly set
+        let keep_alive = cfg.keep_alive_interval.unwrap_or_else(|| {
+            std::time::Duration::from_millis((cfg.max_idle_timeout.as_millis() / 2) as u64)
+        });
+        transport.keep_alive_interval(Some(keep_alive));
+        Some(Arc::new(transport))
+    } else {
+        None
+    }
+}
+
+/// Build rustls ClientConfig for QUIC, with optional client certificate
+fn build_rustls_client_config(
+    roots: rustls::RootCertStore,
+    client_cert_pem: Option<String>,
+) -> anyhow::Result<rustls::ClientConfig> {
+    if let Some(cert_pem) = client_cert_pem {
+        let mut cert_cursor = Cursor::new(cert_pem.as_bytes());
+
+        // Extract certificate chain
+        let certs: Vec<rustls::pki_types::CertificateDer> = rustls_pemfile::certs(&mut cert_cursor)
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to parse client certificate")?;
+
+        if certs.is_empty() {
+            anyhow::bail!("No certificates found in PEM");
+        }
+
+        // Extract private key by reading all PEM items and finding the key
+        let mut key_cursor = Cursor::new(cert_pem.as_bytes());
+        let mut private_key: Option<rustls::pki_types::PrivateKeyDer> = None;
+
+        loop {
+            match rustls_pemfile::read_one(&mut key_cursor) {
+                Ok(Some(item)) => {
+                    match item {
+                        rustls_pemfile::Item::Pkcs8Key(key) => {
+                            private_key = Some(rustls::pki_types::PrivateKeyDer::Pkcs8(key));
+                            break;
+                        }
+                        rustls_pemfile::Item::Sec1Key(key) => {
+                            private_key = Some(rustls::pki_types::PrivateKeyDer::Sec1(key));
+                            break;
+                        }
+                        rustls_pemfile::Item::X509Certificate(_) => {
+                            // Skip certificates, we already have them
+                            continue;
+                        }
+                        _ => {
+                            // Skip other items
+                            continue;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    anyhow::bail!("Failed to read private key from PEM: {}", e);
+                }
+            }
+        }
+
+        let private_key = private_key.ok_or_else(|| anyhow!("No private key found in PEM"))?;
+
+        // Build config with client certificate
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(certs, private_key)
+            .context("Failed to configure client certificate")
+    } else {
+        // Build config without client certificate
+        Ok(rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth())
+    }
+}
+
 /// Establish a QUIC connection to a remote mux server
 pub async fn establish_quic_connection(
     remote_address: &str,
@@ -151,104 +236,18 @@ pub async fn establish_quic_connection(
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
 
-    // If client certificate is provided, use it for mutual TLS
-    if let Some(cert_pem) = client_cert_pem {
-        let mut cert_cursor = Cursor::new(cert_pem.as_bytes());
+    // Build rustls client config (with or without client certificate)
+    let client_crypto = build_rustls_client_config(roots, client_cert_pem)?;
 
-        // Extract certificate chain
-        let certs: Vec<rustls::pki_types::CertificateDer> = rustls_pemfile::certs(&mut cert_cursor)
-            .collect::<Result<Vec<_>, _>>()
-            .context("Failed to parse client certificate")?;
+    let quic_client_config = RustlsQuicClientConfig::try_from(client_crypto)?;
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
 
-        if certs.is_empty() {
-            anyhow::bail!("No certificates found in PEM");
-        }
-
-        // Extract private key by reading all PEM items and finding the key
-        let mut key_cursor = Cursor::new(cert_pem.as_bytes());
-        let mut private_key: Option<rustls::pki_types::PrivateKeyDer> = None;
-
-        loop {
-            match rustls_pemfile::read_one(&mut key_cursor) {
-                Ok(Some(item)) => {
-                    match item {
-                        rustls_pemfile::Item::Pkcs8Key(key) => {
-                            private_key = Some(rustls::pki_types::PrivateKeyDer::Pkcs8(key));
-                            break;
-                        }
-                        rustls_pemfile::Item::Sec1Key(key) => {
-                            private_key = Some(rustls::pki_types::PrivateKeyDer::Sec1(key));
-                            break;
-                        }
-                        rustls_pemfile::Item::X509Certificate(_) => {
-                            // Skip certificates, we already have them
-                            continue;
-                        }
-                        _ => {
-                            // Skip other items
-                            continue;
-                        }
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    anyhow::bail!("Failed to read private key from PEM: {}", e);
-                }
-            }
-        }
-
-        let private_key = private_key.ok_or_else(|| anyhow!("No private key found in PEM"))?;
-
-        // Use the CA from quiccreds to verify the server's certificate
-        let builder = rustls::ClientConfig::builder().with_root_certificates(roots);
-        let client_crypto = builder.with_client_auth_cert(certs, private_key)
-            .context("Failed to configure client certificate")?;
-
-        let quic_client_config = RustlsQuicClientConfig::try_from(client_crypto)?;
-        let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
-
-        // Apply transport configuration from config
-        if let Some(cfg) = config {
-            let mut transport = quinn::TransportConfig::default();
-            transport.max_idle_timeout(Some(
-                quinn::IdleTimeout::try_from(cfg.max_idle_timeout)
-                    .context("Invalid max_idle_timeout")?,
-            ));
-            // Default keep_alive_interval to half of max_idle_timeout if not explicitly set
-            let keep_alive = cfg.keep_alive_interval.unwrap_or_else(|| {
-                std::time::Duration::from_millis((cfg.max_idle_timeout.as_millis() / 2) as u64)
-            });
-            transport.keep_alive_interval(Some(keep_alive));
-            client_config.transport_config(Arc::new(transport));
-        }
-
-        endpoint.set_default_client_config(client_config);
-    } else {
-        // No client certificate - use no client auth
-        let client_crypto = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-
-        let quic_client_config = RustlsQuicClientConfig::try_from(client_crypto)?;
-        let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
-
-        // Apply transport configuration from config
-        if let Some(cfg) = config {
-            let mut transport = quinn::TransportConfig::default();
-            transport.max_idle_timeout(Some(
-                quinn::IdleTimeout::try_from(cfg.max_idle_timeout)
-                    .context("Invalid max_idle_timeout")?,
-            ));
-            // Default keep_alive_interval to half of max_idle_timeout if not explicitly set
-            let keep_alive = cfg.keep_alive_interval.unwrap_or_else(|| {
-                std::time::Duration::from_millis((cfg.max_idle_timeout.as_millis() / 2) as u64)
-            });
-            transport.keep_alive_interval(Some(keep_alive));
-            client_config.transport_config(Arc::new(transport));
-        }
-
-        endpoint.set_default_client_config(client_config);
+    // Apply transport configuration from config
+    if let Some(transport) = configure_transport(config) {
+        client_config.transport_config(transport);
     }
+
+    endpoint.set_default_client_config(client_config);
 
     // Connect to server
     log::info!("QUIC: Initiating connection to {} (hostname: {})", socket_addr, hostname);

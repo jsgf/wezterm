@@ -20,4 +20,5 @@ echo "Data: $DATA_DIR"
 
 RELEASE=""
 
-WEZTERM_LOG=wezterm_mux_server::quic_server=debug,wezterm_mux_server_impl=debug cargo run --features quic $RELEASE -p wezterm-mux-server -- --config-file "$CONFIG_DIR/wezterm.lua"
+# export WEZTERM_LOG=wezterm_mux_server::quic_server=debug,wezterm_mux_server_impl=debug
+cargo run --features quic $RELEASE -p wezterm-mux-server -- --config-file "$CONFIG_DIR/wezterm.lua"

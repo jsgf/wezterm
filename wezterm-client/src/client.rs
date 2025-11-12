@@ -975,74 +975,36 @@ impl Reconnectable {
         if let Some(Ok(ssh_params)) = tls_client.ssh_parameters() {
             if self.tls_creds.is_none() {
                 // We need to bootstrap via an ssh session
+                let sess = crate::ssh_bootstrap::establish_ssh_session(&ssh_params, ui)?;
 
-                let mut ssh_config = wezterm_ssh::Config::new();
-                ssh_config.add_default_config_files();
-
-                let mut fields = ssh_params.host_and_port.split(':');
-                let host = fields
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("no host component somehow"))?;
-                let port = fields.next();
-
-                let mut ssh_config = ssh_config.for_host(host);
-                if let Some(username) = &ssh_params.username {
-                    ssh_config.insert("user".to_string(), username.to_string());
-                }
-                if let Some(port) = port {
-                    ssh_config.insert("port".to_string(), port.to_string());
-                }
-
-                let sess = ssh_connect_with_ui(ssh_config, ui)?;
+                let cmd = format!(
+                    "{} cli tlscreds",
+                    Self::wezterm_bin_path(&tls_client.remote_wezterm_path)
+                );
+                ui.output_str(&format!("Running: {}\n", cmd));
 
                 let creds = ui.run_and_log_error(|| {
                     // The `tlscreds` command will start the server if needed and then
                     // obtain client credentials that we can use for tls.
-                    let cmd = format!(
-                        "{} cli tlscreds",
-                        Self::wezterm_bin_path(&tls_client.remote_wezterm_path)
-                    );
-
-                    ui.output_str(&format!("Running: {}\n", cmd));
-                    let mut exec = smol::block_on(sess.exec(&cmd, None))
-                        .with_context(|| format!("executing `{}` on remote host", cmd))?;
-
-                    log::debug!("waiting for command to finish");
-                    let status = exec.child.wait()?;
-                    if !status.success() {
-                        anyhow::bail!("{} failed", cmd);
-                    }
-
-                    drop(exec.stdin);
-
-                    let mut stderr = exec.stderr;
-                    thread::spawn(move || {
-                        // stderr is ideally empty
-                        let mut err = String::new();
-                        let _ = stderr.read_to_string(&mut err);
-                        if !err.is_empty() {
-                            log::error!("remote: `{}` stderr -> `{}`", cmd, err);
-                        }
-                    });
-
-                    let creds = match Pdu::decode(exec.stdout)
-                        .context("reading tlscreds response")?
-                        .pdu
-                    {
-                        Pdu::GetTlsCredsResponse(creds) => creds,
-                        _ => bail!("unexpected response to tlscreds"),
-                    };
-
-                    // Save the credentials to disk, as that is currently the easiest
-                    // way to get them into openssl.  Ideally we'd keep these entirely
-                    // in memory.
-                    std::fs::write(&self.tls_creds_ca_path()?, creds.ca_cert_pem.as_bytes())?;
-                    std::fs::write(
-                        &self.tls_creds_cert_path()?,
-                        creds.client_cert_pem.as_bytes(),
-                    )?;
-                    log::info!("got TLS creds");
-                    Ok(creds)
+                    crate::ssh_bootstrap::execute_remote_command_for_pdu(
+                        &sess,
+                        cmd.clone(),
+                        |pdu| match pdu {
+                            Pdu::GetTlsCredsResponse(creds) => {
+                                log::info!("got TLS creds");
+                                // Save the credentials to disk, as that is currently the easiest
+                                // way to get them into openssl.  Ideally we'd keep these entirely
+                                // in memory.
+                                std::fs::write(&self.tls_creds_ca_path()?, creds.ca_cert_pem.as_bytes())?;
+                                std::fs::write(
+                                    &self.tls_creds_cert_path()?,
+                                    creds.client_cert_pem.as_bytes(),
+                                )?;
+                                Ok(creds)
+                            }
+                            _ => bail!("unexpected response to tlscreds"),
+                        },
+                    )
                 })?;
                 self.tls_creds.replace(creds);
             }
@@ -1152,6 +1114,36 @@ impl Reconnectable {
         Ok(stream)
     }
 
+    /// Try to establish a QUIC connection with given credentials
+    /// On success, stores stream in self
+    #[cfg(feature = "quic")]
+    fn try_quic_connect(
+        &mut self,
+        remote_address: &str,
+        creds: &codec::GetQuicCredsResponse,
+        quic_client: &config::QuicDomainClient,
+        source_description: &str,
+    ) -> anyhow::Result<()> {
+        use crate::quic_client;
+
+        match smol::block_on(quic_client::establish_quic_connection(
+            remote_address,
+            Some(creds.client_cert_pem.clone()),
+            Some(creds.ca_cert_pem.clone()),
+            Some(quic_client),
+        )) {
+            Ok(stream) => {
+                self.stream.replace(stream);
+                log::info!("QUIC connection established from {}", source_description);
+                Ok(())
+            }
+            Err(err) => {
+                log::debug!("QUIC connect with {} failed: {}", source_description, err);
+                Err(err)
+            }
+        }
+    }
+
     pub fn quic_connect(
         &mut self,
         quic_client: config::QuicDomainClient,
@@ -1160,8 +1152,6 @@ impl Reconnectable {
     ) -> anyhow::Result<()> {
         #[cfg(feature = "quic")]
         {
-            use crate::quic_client;
-
             let remote_address = &quic_client.remote_address;
 
             // Check if we have cached credentials in memory
@@ -1170,27 +1160,17 @@ impl Reconnectable {
 
             // If we have cached credentials and they're not expired, try to use them
             if has_cached_creds && !certs_expired {
-                if let Some((creds, _)) = &self.quic_creds {
+                let creds_clone = self.quic_creds.as_ref().map(|(creds, _)| creds.clone());
+                if let Some(creds) = creds_clone {
                     log::debug!("Trying direct QUIC connection with cached credentials");
-                    match smol::block_on(quic_client::establish_quic_connection(
-                        &remote_address,
-                        Some(creds.client_cert_pem.clone()),
-                        Some(creds.ca_cert_pem.clone()),
-                        Some(&quic_client),
-                    )) {
-                        Ok(stream) => {
-                            self.stream.replace(stream);
-                            ui.output_str(&format!(
-                                "QUIC Connected to {} (cached creds)!\n",
-                                remote_address
-                            ));
-                            return Ok(());
-                        }
-                        Err(err) => {
-                            log::debug!("Direct QUIC connect with cached creds failed: {}", err);
-                            // Fall through to SSH bootstrap
-                        }
+                    if self.try_quic_connect(&remote_address, &creds, &quic_client, "cached creds").is_ok() {
+                        ui.output_str(&format!(
+                            "QUIC Connected to {} (cached creds)!\n",
+                            remote_address
+                        ));
+                        return Ok(());
                     }
+                    // Fall through to SSH bootstrap
                 }
             }
 
@@ -1204,25 +1184,14 @@ impl Reconnectable {
             if !has_cached_creds && !certs_expired {
                 if let Ok(Some(creds)) = self.load_quic_creds_from_disk() {
                     log::debug!("Loaded QUIC credentials from disk, trying direct connection");
-                    match smol::block_on(quic_client::establish_quic_connection(
-                        &remote_address,
-                        Some(creds.client_cert_pem.clone()),
-                        Some(creds.ca_cert_pem.clone()),
-                        Some(&quic_client),
-                    )) {
-                        Ok(stream) => {
-                            self.quic_creds
-                                .replace((creds, std::time::SystemTime::now()));
-                            self.stream.replace(stream);
-                            ui.output_str(&format!(
-                                "QUIC Connected to {} (disk creds)!\n",
-                                remote_address
-                            ));
-                            return Ok(());
-                        }
-                        Err(err) => {
-                            log::debug!("Direct QUIC connect with disk creds failed: {}", err);
-                        }
+                    if self.try_quic_connect(&remote_address, &creds, &quic_client, "disk creds").is_ok() {
+                        self.quic_creds
+                            .replace((creds, std::time::SystemTime::now()));
+                        ui.output_str(&format!(
+                            "QUIC Connected to {} (disk creds)!\n",
+                            remote_address
+                        ));
+                        return Ok(());
                     }
                 }
             }
@@ -1231,62 +1200,27 @@ impl Reconnectable {
             if let Some(Ok(ssh_params)) = quic_client.ssh_parameters() {
                 ui.output_str("Bootstrapping QUIC credentials via SSH...\n");
 
-                let mut ssh_config = wezterm_ssh::Config::new();
-                ssh_config.add_default_config_files();
-
-                let mut fields = ssh_params.host_and_port.split(':');
-                let host = fields
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("no host component somehow"))?;
-                let port = fields.next();
-
-                let mut ssh_config = ssh_config.for_host(host);
-                if let Some(username) = &ssh_params.username {
-                    ssh_config.insert("user".to_string(), username.to_string());
-                }
-                if let Some(port) = port {
-                    ssh_config.insert("port".to_string(), port.to_string());
-                }
-
-                let sess = ssh_connect_with_ui(ssh_config, ui)?;
+                let sess = crate::ssh_bootstrap::establish_ssh_session(&ssh_params, ui)?;
 
                 // Execute quiccreds command to get certificates
+                let cmd = format!(
+                    "{} cli quiccreds",
+                    Self::wezterm_bin_path(&quic_client.remote_wezterm_path)
+                );
+                ui.output_str(&format!("Running: {}\n", cmd));
+
                 let creds = ui.run_and_log_error(|| {
-                    let cmd = format!(
-                        "{} cli quiccreds",
-                        Self::wezterm_bin_path(&quic_client.remote_wezterm_path)
-                    );
-
-                    ui.output_str(&format!("Running: {}\n", cmd));
-                    let mut exec = smol::block_on(sess.exec(&cmd, None))
-                        .with_context(|| format!("executing `{}` on remote host", cmd))?;
-
-                    let status = exec.child.wait()?;
-                    if !status.success() {
-                        anyhow::bail!("{} failed", cmd);
-                    }
-
-                    drop(exec.stdin);
-
-                    let mut stderr = exec.stderr;
-                    thread::spawn(move || {
-                        let mut err = String::new();
-                        let _ = stderr.read_to_string(&mut err);
-                        if !err.is_empty() {
-                            log::error!("remote: `{}` stderr -> `{}`", cmd, err);
-                        }
-                    });
-
-                    let creds = match Pdu::decode(exec.stdout)
-                        .context("reading quiccreds response")?
-                        .pdu
-                    {
-                        Pdu::GetQuicCredsResponse(creds) => creds,
-                        _ => bail!("unexpected response to quiccreds"),
-                    };
-
-                    log::info!("got QUIC creds");
-                    Ok(creds)
+                    crate::ssh_bootstrap::execute_remote_command_for_pdu(
+                        &sess,
+                        cmd.clone(),
+                        |pdu| match pdu {
+                            Pdu::GetQuicCredsResponse(creds) => {
+                                log::info!("got QUIC creds");
+                                Ok(creds)
+                            }
+                            _ => bail!("unexpected response to quiccreds"),
+                        },
+                    )
                 })?;
 
                 // Save to disk if configured
@@ -1294,18 +1228,16 @@ impl Reconnectable {
 
                 // Now connect with the obtained credentials
                 log::info!("SSH bootstrap complete, now establishing QUIC connection to {}", remote_address);
-                let stream = smol::block_on(quic_client::establish_quic_connection(
+                self.try_quic_connect(
                     &remote_address,
-                    Some(creds.client_cert_pem.clone()),
-                    Some(creds.ca_cert_pem.clone()),
-                    Some(&quic_client),
-                ))?;
-                log::info!("QUIC connection established after SSH bootstrap");
+                    &creds,
+                    &quic_client,
+                    "SSH bootstrap",
+                )?;
 
                 // Store credentials in memory with timestamp
                 self.quic_creds
                     .replace((creds, std::time::SystemTime::now()));
-                self.stream.replace(stream);
                 ui.output_str(&format!("QUIC Connected to {}!\n", remote_address));
                 Ok(())
             } else {
