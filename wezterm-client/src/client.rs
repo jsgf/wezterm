@@ -1174,12 +1174,6 @@ impl Reconnectable {
                 }
             }
 
-            // If certificates expired, log it
-            if certs_expired {
-                log::info!("QUIC certificates expired, need to refresh via SSH");
-                ui.output_str("QUIC certificates have expired, refreshing via SSH...\n");
-            }
-
             // SSH bootstrap for certificate exchange
             if let Some(Ok(ssh_params)) = quic_client.ssh_parameters() {
                 ui.output_str("Bootstrapping QUIC credentials via SSH...\n");
