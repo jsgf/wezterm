@@ -33,11 +33,17 @@ impl AsyncRead for QuicStream {
     ) -> Poll<std::io::Result<usize>> {
         // Use futures_lite::io::AsyncRead trait (imported at top)
         match Pin::new(&mut self.recv).poll_read(cx, buf) {
-            Poll::Ready(Ok(n)) => Poll::Ready(Ok(n)),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("QUIC read error: {:?}", e),
-            ))),
+            Poll::Ready(Ok(n)) => {
+                log::trace!("QUIC poll_read: Ready with {} bytes", n);
+                Poll::Ready(Ok(n))
+            }
+            Poll::Ready(Err(e)) => {
+                log::error!("QUIC poll_read: Error: {:?}", e);
+                Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("QUIC read error: {:?}", e),
+                )))
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -51,16 +57,23 @@ impl AsyncWrite for QuicStream {
     ) -> Poll<std::io::Result<usize>> {
         // Use futures_lite::io::AsyncWrite trait (imported at top)
         match Pin::new(&mut self.send).poll_write(cx, buf) {
-            Poll::Ready(Ok(n)) => Poll::Ready(Ok(n)),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("QUIC write error: {:?}", e),
-            ))),
+            Poll::Ready(Ok(n)) => {
+                log::trace!("QUIC poll_write: Ready wrote {} bytes", n);
+                Poll::Ready(Ok(n))
+            }
+            Poll::Ready(Err(e)) => {
+                log::error!("QUIC poll_write: Error: {:?}", e);
+                Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("QUIC write error: {:?}", e),
+                )))
+            }
             Poll::Pending => Poll::Pending,
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        log::trace!("QUIC poll_flush called");
         Poll::Ready(Ok(()))
     }
 
@@ -68,6 +81,7 @@ impl AsyncWrite for QuicStream {
         mut self: Pin<&mut Self>,
         _cx: &mut TaskContext<'_>,
     ) -> Poll<std::io::Result<()>> {
+        log::debug!("QUIC poll_close called");
         match self.send.finish() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(_e) => Poll::Ready(Err(std::io::Error::new(
@@ -91,6 +105,7 @@ pub async fn process_quic_stream(mut stream: QuicStream) -> anyhow::Result<()> {
     use smol::channel::unbounded;
     use wezterm_mux_server_impl::sessionhandler::{PduSender, SessionHandler};
 
+    log::debug!("QUIC: process_quic_stream starting");
     log::info!("Processing QUIC stream");
 
     let (item_tx, item_rx) = unbounded::<DecodedPdu>();
@@ -98,15 +113,17 @@ pub async fn process_quic_stream(mut stream: QuicStream) -> anyhow::Result<()> {
     let pdu_sender = PduSender::new({
         let item_tx = item_tx.clone();
         move |pdu| {
+            log::debug!("QUIC: PduSender callback with PDU");
             item_tx
                 .try_send(pdu)
                 .map_err(|e| anyhow::anyhow!("{:?}", e))
         }
     });
     let mut handler = SessionHandler::new(pdu_sender);
+    log::debug!("QUIC: SessionHandler created, entering main loop");
 
     loop {
-        log::debug!("Waiting for request or response");
+        log::debug!("QUIC: Top of stream processing loop, waiting for request or response");
         // Wait for either a response to send OR data to read from stream
         match smol::future::or(
             async {
@@ -143,15 +160,18 @@ pub async fn process_quic_stream(mut stream: QuicStream) -> anyhow::Result<()> {
 }
 
 /// Spawn a QUIC listener for the given configuration
+/// Like TLS, we run this in a separate thread with its own smol::block_on executor
+/// This avoids executor incompatibility with async-executor used by promise::spawn
 pub fn spawn_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()> {
     let quic_server = quic_server.clone();
 
-    promise::spawn::spawn(async move {
-        if let Err(e) = run_quic_listener(&quic_server).await {
-            log::error!("QUIC listener error: {}", e);
-        }
-    })
-    .detach();
+    std::thread::spawn(move || {
+        smol::block_on(async {
+            if let Err(e) = run_quic_listener(&quic_server).await {
+                log::error!("QUIC listener error: {}", e);
+            }
+        })
+    });
 
     Ok(())
 }
@@ -242,19 +262,26 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
         .set_nonblocking(true)
         .context("setting socket to non-blocking")?;
 
-    // Create Quinn endpoint with explicit SmolRuntime
+    // Create Quinn endpoint with SmolRuntime
+    // This runs in its own thread with its own executor, so no incompatibility with async-executor
     let runtime = Arc::new(quinn::SmolRuntime);
     let endpoint = quinn::Endpoint::new(Default::default(), Some(quinn_config), socket, runtime)
         .context("creating QUIC endpoint")?;
 
     log::info!("QUIC server successfully created endpoint and listening on {}", listen_addr);
 
-    // Run the accept loop integrated with wezterm's executor
+    // Run the accept loop in this thread's smol executor
+    log::debug!("QUIC: Starting main accept loop");
     loop {
+        log::debug!("QUIC: Waiting for new connection with endpoint.accept().await");
         match endpoint.accept().await {
             Some(connecting) => {
+                log::debug!("QUIC: Got Connecting, waiting for handshake completion");
                 let connection = match connecting.await {
-                    Ok(conn) => conn,
+                    Ok(conn) => {
+                        log::info!("QUIC: Handshake completed successfully");
+                        conn
+                    }
                     Err(e) => {
                         log::error!("QUIC handshake failed: {}", e);
                         continue;
@@ -262,20 +289,25 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
                 };
 
                 let peer_addr = connection.remote_address();
-                log::debug!("QUIC connection from {}", peer_addr);
+                log::info!("QUIC connection from {}", peer_addr);
 
-                // Spawn connection handler into wezterm's executor
-                promise::spawn::spawn(async move {
+                // Spawn connection handler in smol executor (we're in a separate thread with smol::block_on)
+                log::debug!("QUIC: Spawning connection handler for {}", peer_addr);
+                smol::spawn(async move {
+                    log::debug!("QUIC: Connection handler task started for {}", peer_addr);
                     loop {
+                        log::debug!("QUIC: Waiting for stream from {} with accept_bi().await", peer_addr);
                         match connection.accept_bi().await {
                             Ok((send, recv)) => {
-                                let stream = QuicStream::new(send, recv);
                                 log::info!("Accepted QUIC stream from {}", peer_addr);
+                                let stream = QuicStream::new(send, recv);
 
                                 // Process each stream in-place (sequential per connection)
+                                log::debug!("QUIC: Processing stream from {}", peer_addr);
                                 if let Err(e) = process_quic_stream(stream).await {
                                     log::error!("QUIC stream error: {}", e);
                                 }
+                                log::debug!("QUIC: Stream processing complete for {}", peer_addr);
                             }
                             Err(e) => {
                                 log::info!("No more streams from {}: {}", peer_addr, e);
@@ -283,8 +315,10 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
                             }
                         }
                     }
+                    log::debug!("QUIC: Connection handler task ending for {}", peer_addr);
                 })
                 .detach();
+                log::debug!("QUIC: Connection handler spawned for {}", peer_addr);
             }
             None => {
                 log::info!("QUIC endpoint closed");

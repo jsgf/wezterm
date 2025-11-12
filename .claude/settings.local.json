@@ -17,7 +17,9 @@
       "Bash(__NEW_LINE__ export TEST_DIR=/tmp/wezterm-quic-test export CONFIG_DIR=$TEST_DIR/config export DATA_DIR=$TEST_DIR/data)",
       "Bash(killall:*)",
       "Bash(RUST_LOG=info WEZTERM_CONFIG_DIR=$CONFIG_DIR XDG_DATA_HOME=$DATA_DIR/share HOME=$DATA_DIR timeout 3 /home/jeremy/git/wezterm/target/release/wezterm-mux-server:*)",
-      "Bash(__NEW_LINE__ /home/jeremy/git/wezterm/target/release/wezterm-mux-server --help)"
+      "Bash(__NEW_LINE__ /home/jeremy/git/wezterm/target/release/wezterm-mux-server --help)",
+      "Bash(git checkout:*)",
+      "Bash(cargo check:*)"
     ],
     "deny": [],
     "ask": []

@@ -18,7 +18,7 @@ use openssl::x509::X509;
 use portable_pty::Child;
 use smol::channel::{bounded, unbounded, Receiver, Sender};
 use smol::prelude::*;
-use smol::{block_on, Async};
+use smol::Async;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::marker::Unpin;
@@ -43,18 +43,16 @@ struct Timeout;
 #[error("ChannelSendError")]
 struct ChannelSendError;
 
-enum ReaderMessage {
-    SendPdu {
-        pdu: Pdu,
-        promise: Sender<anyhow::Result<Pdu>>,
-    },
-    Readable,
-    CheckRenewal,
+/// Message to send a PDU and get a response
+#[derive(Debug)]
+struct SendPduMessage {
+    pdu: Pdu,
+    promise: Sender<anyhow::Result<Pdu>>,
 }
 
 #[derive(Clone)]
 pub struct Client {
-    sender: Sender<ReaderMessage>,
+    sender: Sender<SendPduMessage>,
     local_domain_id: Option<DomainId>,
     pub client_id: ClientId,
     client_domain_config: ClientDomainConfig,
@@ -341,17 +339,19 @@ enum NotReconnectableError {
 fn client_thread(
     reconnectable: &mut Reconnectable,
     local_domain_id: Option<DomainId>,
-    rx: &mut Receiver<ReaderMessage>,
+    rx: &mut Receiver<SendPduMessage>,
 ) -> anyhow::Result<()> {
-    block_on(client_thread_async(reconnectable, local_domain_id, rx))
+    smol::block_on(client_thread_async(reconnectable, local_domain_id, rx))
 }
 
 async fn client_thread_async(
     reconnectable: &mut Reconnectable,
     local_domain_id: Option<DomainId>,
-    rx: &mut Receiver<ReaderMessage>,
+    rx: &mut Receiver<SendPduMessage>,
 ) -> anyhow::Result<()> {
     let mut next_serial = 1u64;
+
+    log::debug!("client_thread_async started");
 
     struct Promises {
         map: HashMap<u64, Sender<anyhow::Result<Pdu>>>,
@@ -376,31 +376,34 @@ async fn client_thread_async(
     };
 
     let mut stream = reconnectable.take_stream().unwrap();
-    let mut renewal_check_timer = smol::Timer::after(std::time::Duration::from_secs(60));
+    let mut renewal_check_timer = Box::pin(futures::FutureExt::fuse(smol::Timer::after(std::time::Duration::from_secs(60))));
 
     loop {
-        let rx_msg = rx.recv();
-        let wait_for_read = stream
-            .wait_for_readable()
-            .map(|_| Ok(ReaderMessage::Readable));
-        let renewal_timeout = async {
-            (&mut renewal_check_timer).await;
-            Ok::<ReaderMessage, smol::channel::RecvError>(ReaderMessage::CheckRenewal)
-        };
+        log::debug!("Waiting for message or PDU");
+        futures::select! {
+            // Handle incoming RPC requests from the sender
+            msg = rx.recv().fuse() => {
+                match msg {
+                    Ok(SendPduMessage { pdu, promise }) => {
+                        log::debug!("got SendPdu {pdu:?}");
+                        let serial = next_serial;
+                        next_serial += 1;
+                        promises.map.insert(serial, promise);
 
-        match smol::future::or(smol::future::or(rx_msg, wait_for_read), renewal_timeout).await {
-            Ok(ReaderMessage::SendPdu { pdu, promise }) => {
-                let serial = next_serial;
-                next_serial += 1;
-                promises.map.insert(serial, promise);
-
-                pdu.encode_async(&mut stream, serial)
-                    .await
-                    .context("encoding a PDU to send to the server")?;
-                stream.flush().await.context("flushing PDU to server")?;
+                        log::debug!("encoding serial {} {}", serial, pdu.pdu_name());
+                        pdu.encode_async(&mut stream, serial)
+                            .await
+                            .context("encoding a PDU to send to the server")?;
+                        stream.flush().await.context("flushing PDU to server")?;
+                    }
+                    Err(_) => {
+                        return Err(NotReconnectableError::ClientWasDestroyed.into());
+                    }
+                }
             }
-            Ok(ReaderMessage::Readable) => {
-                match Pdu::decode_async(&mut stream, Some(next_serial)).await {
+            // Handle incoming PDUs from the server
+            pdu = Pdu::decode_async(&mut stream, Some(next_serial)).fuse() => {
+                match pdu {
                     Ok(decoded) => {
                         log::debug!(
                             "decoded serial {} {}",
@@ -408,6 +411,7 @@ async fn client_thread_async(
                             decoded.pdu.pdu_name()
                         );
                         if decoded.serial == 0 {
+                            // Unilateral PDU from server (e.g., GetQuicCredsResponse for renewal)
                             process_unilateral(local_domain_id, decoded)
                                 .context("processing unilateral PDU from server")
                                 .map_err(|e| {
@@ -415,6 +419,7 @@ async fn client_thread_async(
                                     e
                                 })?;
                         } else if let Some(promise) = promises.map.remove(&decoded.serial) {
+                            // Response to an RPC we sent
                             if promise.try_send(Ok(decoded.pdu)).is_err() {
                                 return Err(NotReconnectableError::ClientWasDestroyed.into());
                             }
@@ -433,31 +438,22 @@ async fn client_thread_async(
                     }
                 }
             }
-            Ok(ReaderMessage::CheckRenewal) => {
-                // Check if QUIC certificates need renewal
+            // Handle certificate renewal timer
+            _ = &mut renewal_check_timer => {
+                log::debug!("Certificate renewal check");
                 if reconnectable.should_renew_quic_cert() {
                     log::info!("QUIC certificate approaching expiry, attempting renewal");
-                    // Try to renew by sending GetQuicCreds request
+                    // Send renewal request as a normal RPC
+                    let serial = next_serial;
+                    next_serial += 1;
+
                     match Pdu::GetQuicCreds(codec::GetQuicCreds {})
-                        .encode_async(&mut stream, 0)
+                        .encode_async(&mut stream, serial)
                         .await
                     {
                         Ok(_) => {
                             stream.flush().await.ok();
-                            // Wait for response
-                            if let Ok(decoded) = Pdu::decode_async(&mut stream, None).await {
-                                if let Pdu::GetQuicCredsResponse(new_creds) = decoded.pdu {
-                                    log::info!("QUIC certificates renewed");
-                                    reconnectable
-                                        .quic_creds
-                                        .replace((new_creds.clone(), std::time::SystemTime::now()));
-                                    reconnectable.save_quic_creds_to_disk(&new_creds).ok();
-                                } else {
-                                    log::warn!(
-                                        "Unexpected response to GetQuicCreds renewal request"
-                                    );
-                                }
-                            }
+                            // Response will be handled in the PDU decode branch above
                         }
                         Err(e) => {
                             log::warn!("Failed to send GetQuicCreds for renewal: {}", e);
@@ -465,10 +461,7 @@ async fn client_thread_async(
                     }
                 }
                 // Reset the renewal timer for the next check (check every 60 seconds)
-                renewal_check_timer = smol::Timer::after(std::time::Duration::from_secs(60));
-            }
-            Err(_) => {
-                return Err(NotReconnectableError::ClientWasDestroyed.into());
+                renewal_check_timer = Box::pin(futures::FutureExt::fuse(smol::Timer::after(std::time::Duration::from_secs(60))));
             }
         }
     }
@@ -557,9 +550,7 @@ pub fn unix_connect_with_retry(
 }
 
 #[async_trait(?Send)]
-pub trait AsyncReadAndWrite: Unpin + AsyncRead + AsyncWrite + std::fmt::Debug + Send {
-    async fn wait_for_readable(&self) -> anyhow::Result<()>;
-}
+pub trait AsyncReadAndWrite: Unpin + AsyncRead + AsyncWrite + std::fmt::Debug + Send {}
 
 #[async_trait(?Send)]
 impl<T> AsyncReadAndWrite for Async<T>
@@ -570,9 +561,6 @@ where
     T: Send,
     T: async_io::IoSafe,
 {
-    async fn wait_for_readable(&self) -> anyhow::Result<()> {
-        Ok(self.readable().await?)
-    }
 }
 
 #[derive(Debug)]
@@ -1184,7 +1172,7 @@ impl Reconnectable {
             if has_cached_creds && !certs_expired {
                 if let Some((creds, _)) = &self.quic_creds {
                     log::debug!("Trying direct QUIC connection with cached credentials");
-                    match block_on(quic_client::establish_quic_connection(
+                    match smol::block_on(quic_client::establish_quic_connection(
                         &remote_address,
                         Some(creds.client_cert_pem.clone()),
                         Some(creds.ca_cert_pem.clone()),
@@ -1216,7 +1204,7 @@ impl Reconnectable {
             if !has_cached_creds && !certs_expired {
                 if let Ok(Some(creds)) = self.load_quic_creds_from_disk() {
                     log::debug!("Loaded QUIC credentials from disk, trying direct connection");
-                    match block_on(quic_client::establish_quic_connection(
+                    match smol::block_on(quic_client::establish_quic_connection(
                         &remote_address,
                         Some(creds.client_cert_pem.clone()),
                         Some(creds.ca_cert_pem.clone()),
@@ -1306,7 +1294,7 @@ impl Reconnectable {
 
                 // Now connect with the obtained credentials
                 log::info!("SSH bootstrap complete, now establishing QUIC connection to {}", remote_address);
-                let stream = block_on(quic_client::establish_quic_connection(
+                let stream = smol::block_on(quic_client::establish_quic_connection(
                     &remote_address,
                     Some(creds.client_cert_pem.clone()),
                     Some(creds.ca_cert_pem.clone()),
@@ -1610,12 +1598,15 @@ impl Client {
 
     pub async fn send_pdu(&self, pdu: Pdu) -> anyhow::Result<Pdu> {
         let (promise, rx) = bounded(1);
+        log::debug!("Sending PDU: {pdu:?}");
         self.sender
-            .send(ReaderMessage::SendPdu { pdu, promise })
+            .send(SendPduMessage { pdu, promise })
             .await
             .map_err(|_| ChannelSendError)
             .context("send_pdu send")?;
-        rx.recv().await.context("send_pdu recv")?
+        let res = rx.recv().await.context("send_pdu recv")?;
+        log::debug!("Received PDU: {res:?}");
+        res
     }
 
     pub async fn resolve_pane_id(&self, pane_id: Option<PaneId>) -> anyhow::Result<PaneId> {

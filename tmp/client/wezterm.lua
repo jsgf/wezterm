@@ -10,7 +10,7 @@ return {
       certificate_lifetime_days = 7,
       enable_0rtt = true,
       enable_migration = true,
-      max_idle_timeout = 30,  -- seconds
+      max_idle_timeout = 30,  -- seconds (keep_alive defaults to half: 15 seconds)
     },
   },
 }

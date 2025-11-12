@@ -73,6 +73,10 @@ pub struct QuicDomainClient {
     #[dynamic(default = "default_max_idle_timeout")]
     pub max_idle_timeout: Duration,
 
+    /// Keep-alive interval for QUIC connections
+    /// If not set, defaults to half of max_idle_timeout
+    pub keep_alive_interval: Option<Duration>,
+
     /// the path to an x509 PEM encoded private key file
     pub pem_private_key: Option<PathBuf>,
 

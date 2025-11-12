@@ -7,8 +7,10 @@ export CONFIG_DIR="$(pwd)/tmp/client"
 export DATA_DIR="$(pwd)/tmp/client/data"
 export WEZTERM_CONFIG_DIR="$CONFIG_DIR"
 export XDG_DATA_HOME="$DATA_DIR/share"
+export XDG_RUNTIME_DIR="$DATA_DIR/run"
 
 mkdir -p "$DATA_DIR/share/wezterm"
+mkdir -p "$DATA_DIR/run"
 
 echo "Connecting to QUIC domain 'quic_test'..."
 echo "Config: $CONFIG_DIR/wezterm.lua"

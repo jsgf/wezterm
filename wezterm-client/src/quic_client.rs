@@ -89,12 +89,7 @@ impl AsyncWrite for QuicStream {
 }
 
 #[async_trait(?Send)]
-impl crate::client::AsyncReadAndWrite for QuicStream {
-    async fn wait_for_readable(&self) -> anyhow::Result<()> {
-        // No-op for QUIC streams - they handle buffering internally
-        Ok(())
-    }
-}
+impl crate::client::AsyncReadAndWrite for QuicStream {}
 
 /// Establish a QUIC connection to a remote mux server
 pub async fn establish_quic_connection(
@@ -219,6 +214,11 @@ pub async fn establish_quic_connection(
                 quinn::IdleTimeout::try_from(cfg.max_idle_timeout)
                     .context("Invalid max_idle_timeout")?,
             ));
+            // Default keep_alive_interval to half of max_idle_timeout if not explicitly set
+            let keep_alive = cfg.keep_alive_interval.unwrap_or_else(|| {
+                std::time::Duration::from_millis((cfg.max_idle_timeout.as_millis() / 2) as u64)
+            });
+            transport.keep_alive_interval(Some(keep_alive));
             client_config.transport_config(Arc::new(transport));
         }
 
@@ -239,6 +239,11 @@ pub async fn establish_quic_connection(
                 quinn::IdleTimeout::try_from(cfg.max_idle_timeout)
                     .context("Invalid max_idle_timeout")?,
             ));
+            // Default keep_alive_interval to half of max_idle_timeout if not explicitly set
+            let keep_alive = cfg.keep_alive_interval.unwrap_or_else(|| {
+                std::time::Duration::from_millis((cfg.max_idle_timeout.as_millis() / 2) as u64)
+            });
+            transport.keep_alive_interval(Some(keep_alive));
             client_config.transport_config(Arc::new(transport));
         }
 
