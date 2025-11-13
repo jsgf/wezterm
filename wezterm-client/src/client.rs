@@ -18,7 +18,7 @@ use openssl::x509::X509;
 use portable_pty::Child;
 use smol::channel::{bounded, unbounded, Receiver, Sender};
 use smol::prelude::*;
-use smol::{block_on, Async};
+use smol::Async;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::marker::Unpin;
@@ -43,17 +43,16 @@ struct Timeout;
 #[error("ChannelSendError")]
 struct ChannelSendError;
 
-enum ReaderMessage {
-    SendPdu {
-        pdu: Pdu,
-        promise: Sender<anyhow::Result<Pdu>>,
-    },
-    Readable,
+/// Message to send a PDU and get a response
+#[derive(Debug)]
+struct SendPduMessage {
+    pdu: Pdu,
+    promise: Sender<anyhow::Result<Pdu>>,
 }
 
 #[derive(Clone)]
 pub struct Client {
-    sender: Sender<ReaderMessage>,
+    sender: Sender<SendPduMessage>,
     local_domain_id: Option<DomainId>,
     pub client_id: ClientId,
     client_domain_config: ClientDomainConfig,
@@ -337,20 +336,151 @@ enum NotReconnectableError {
     ClientWasDestroyed,
 }
 
+/// Create a renewal check timer that is either active (QUIC) or always pending
+fn create_renewal_check_timer() -> Box<dyn std::future::Future<Output = ()> + Unpin> {
+    #[cfg(feature = "quic")]
+    {
+        struct TimerFuture;
+        impl std::future::Future for TimerFuture {
+            type Output = ();
+            fn poll(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
+                std::task::Poll::Pending
+            }
+        }
+        impl Unpin for TimerFuture {}
+
+        // For now, return a pending future - the timer is reset in the main loop
+        Box::new(TimerFuture)
+    }
+    #[cfg(not(feature = "quic"))]
+    {
+        Box::new(futures::future::pending::<()>())
+    }
+}
+
+/// QUIC credential management: disk persistence, expiry checking, and renewal
+#[cfg(feature = "quic")]
+mod quic_creds {
+    use super::*;
+
+    fn creds_path(config: &ClientDomainConfig) -> anyhow::Result<PathBuf> {
+        let path = config::pki_dir()?.join(config.name()).join("quic");
+        std::fs::create_dir_all(&path)?;
+        Ok(path)
+    }
+
+    fn creds_ca_path(config: &ClientDomainConfig) -> anyhow::Result<PathBuf> {
+        Ok(creds_path(config)?.join("ca.pem"))
+    }
+
+    fn creds_cert_path(config: &ClientDomainConfig) -> anyhow::Result<PathBuf> {
+        Ok(creds_path(config)?.join("cert.pem"))
+    }
+
+    impl Reconnectable {
+        pub(super) fn quic_creds_path(&self) -> anyhow::Result<PathBuf> {
+            creds_path(&self.config)
+        }
+
+        pub(super) fn quic_creds_ca_path(&self) -> anyhow::Result<PathBuf> {
+            creds_ca_path(&self.config)
+        }
+
+        pub(super) fn quic_creds_cert_path(&self) -> anyhow::Result<PathBuf> {
+            creds_cert_path(&self.config)
+        }
+
+        pub(super) fn load_quic_creds_from_disk(&mut self) -> anyhow::Result<Option<GetQuicCredsResponse>> {
+            if let ClientDomainConfig::Quic(quic_client) = &self.config {
+                if !quic_client.persist_to_disk {
+                    return Ok(None);
+                }
+            } else {
+                return Ok(None);
+            }
+
+            let ca_path = self.quic_creds_ca_path()?;
+            let cert_path = self.quic_creds_cert_path()?;
+
+            if !ca_path.exists() || !cert_path.exists() {
+                return Ok(None);
+            }
+
+            let ca_cert_pem = std::fs::read_to_string(&ca_path)?;
+            let client_cert_pem = std::fs::read_to_string(&cert_path)?;
+
+            Ok(Some(GetQuicCredsResponse {
+                ca_cert_pem,
+                client_cert_pem,
+            }))
+        }
+
+        pub(super) fn save_quic_creds_to_disk(&self, creds: &GetQuicCredsResponse) -> anyhow::Result<()> {
+            if let ClientDomainConfig::Quic(quic_client) = &self.config {
+                if !quic_client.persist_to_disk {
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
+
+            let ca_path = self.quic_creds_ca_path()?;
+            let cert_path = self.quic_creds_cert_path()?;
+
+            std::fs::write(&ca_path, creds.ca_cert_pem.as_bytes())?;
+            std::fs::write(&cert_path, creds.client_cert_pem.as_bytes())?;
+
+            Ok(())
+        }
+
+        pub(super) fn is_quic_cert_expired(&self) -> bool {
+            if let Some((_, obtained_at)) = &self.quic_creds {
+                if let ClientDomainConfig::Quic(quic_client) = &self.config {
+                    let cert_lifetime_secs = (quic_client.certificate_lifetime_days as u64) * 86400;
+                    if let Ok(elapsed) = obtained_at.elapsed() {
+                        // Cert is expired if we've passed the lifetime
+                        return elapsed.as_secs() >= cert_lifetime_secs;
+                    }
+                }
+            }
+            false
+        }
+
+        pub(super) fn should_renew_quic_cert(&self) -> bool {
+            if let Some((_, obtained_at)) = &self.quic_creds {
+                if let ClientDomainConfig::Quic(quic_client) = &self.config {
+                    let cert_lifetime_secs = (quic_client.certificate_lifetime_days as u64) * 86400;
+                    // Trigger renewal at 80% of lifetime
+                    let renewal_threshold = (cert_lifetime_secs as f64 * 0.8) as u64;
+                    if let Ok(elapsed) = obtained_at.elapsed() {
+                        return elapsed.as_secs() >= renewal_threshold;
+                    }
+                }
+            }
+            false
+        }
+    }
+}
+
 fn client_thread(
     reconnectable: &mut Reconnectable,
     local_domain_id: Option<DomainId>,
-    rx: &mut Receiver<ReaderMessage>,
+    rx: &mut Receiver<SendPduMessage>,
 ) -> anyhow::Result<()> {
-    block_on(client_thread_async(reconnectable, local_domain_id, rx))
+    smol::block_on(client_thread_async(reconnectable, local_domain_id, rx))
 }
 
 async fn client_thread_async(
     reconnectable: &mut Reconnectable,
     local_domain_id: Option<DomainId>,
-    rx: &mut Receiver<ReaderMessage>,
+    rx: &mut Receiver<SendPduMessage>,
 ) -> anyhow::Result<()> {
     let mut next_serial = 1u64;
+
+    log::debug!("client_thread_async started");
 
     struct Promises {
         map: HashMap<u64, Sender<anyhow::Result<Pdu>>>,
@@ -376,25 +506,34 @@ async fn client_thread_async(
 
     let mut stream = reconnectable.take_stream().unwrap();
 
+    let mut renewal_check_timer = Box::pin(create_renewal_check_timer().fuse());
+
     loop {
-        let rx_msg = rx.recv();
-        let wait_for_read = stream
-            .wait_for_readable()
-            .map(|_| Ok(ReaderMessage::Readable));
+        log::debug!("Waiting for message or PDU");
+        futures::select! {
+            // Handle incoming RPC requests from the sender
+            msg = rx.recv().fuse() => {
+                match msg {
+                    Ok(SendPduMessage { pdu, promise }) => {
+                        log::debug!("got SendPdu {pdu:?}");
+                        let serial = next_serial;
+                        next_serial += 1;
+                        promises.map.insert(serial, promise);
 
-        match smol::future::or(rx_msg, wait_for_read).await {
-            Ok(ReaderMessage::SendPdu { pdu, promise }) => {
-                let serial = next_serial;
-                next_serial += 1;
-                promises.map.insert(serial, promise);
-
-                pdu.encode_async(&mut stream, serial)
-                    .await
-                    .context("encoding a PDU to send to the server")?;
-                stream.flush().await.context("flushing PDU to server")?;
+                        log::debug!("encoding serial {} {}", serial, pdu.pdu_name());
+                        pdu.encode_async(&mut stream, serial)
+                            .await
+                            .context("encoding a PDU to send to the server")?;
+                        stream.flush().await.context("flushing PDU to server")?;
+                    }
+                    Err(_) => {
+                        return Err(NotReconnectableError::ClientWasDestroyed.into());
+                    }
+                }
             }
-            Ok(ReaderMessage::Readable) => {
-                match Pdu::decode_async(&mut stream, Some(next_serial)).await {
+            // Handle incoming PDUs from the server
+            pdu = Pdu::decode_async(&mut stream, Some(next_serial)).fuse() => {
+                match pdu {
                     Ok(decoded) => {
                         log::debug!(
                             "decoded serial {} {}",
@@ -402,6 +541,7 @@ async fn client_thread_async(
                             decoded.pdu.pdu_name()
                         );
                         if decoded.serial == 0 {
+                            // Unilateral PDU from server (e.g., GetQuicCredsResponse for renewal)
                             process_unilateral(local_domain_id, decoded)
                                 .context("processing unilateral PDU from server")
                                 .map_err(|e| {
@@ -409,6 +549,7 @@ async fn client_thread_async(
                                     e
                                 })?;
                         } else if let Some(promise) = promises.map.remove(&decoded.serial) {
+                            // Response to an RPC we sent
                             if promise.try_send(Ok(decoded.pdu)).is_err() {
                                 return Err(NotReconnectableError::ClientWasDestroyed.into());
                             }
@@ -427,8 +568,33 @@ async fn client_thread_async(
                     }
                 }
             }
-            Err(_) => {
-                return Err(NotReconnectableError::ClientWasDestroyed.into());
+            // Handle certificate renewal timer (QUIC only)
+            _ = &mut renewal_check_timer => {
+                #[cfg(feature = "quic")]
+                {
+                    log::debug!("Certificate renewal check");
+                    if reconnectable.should_renew_quic_cert() {
+                        log::info!("QUIC certificate approaching expiry, attempting renewal");
+                        // Send renewal request as a normal RPC
+                        let serial = next_serial;
+                        next_serial += 1;
+
+                        match Pdu::GetQuicCreds(codec::GetQuicCreds {})
+                            .encode_async(&mut stream, serial)
+                            .await
+                        {
+                            Ok(_) => {
+                                stream.flush().await.ok();
+                                // Response will be handled in the PDU decode branch above
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to send GetQuicCreds for renewal: {}", e);
+                            }
+                        }
+                    }
+                    // Reset the renewal timer for the next check (check every 60 seconds)
+                    renewal_check_timer = Box::pin(create_renewal_check_timer().fuse());
+                }
             }
         }
     }
@@ -517,9 +683,7 @@ pub fn unix_connect_with_retry(
 }
 
 #[async_trait(?Send)]
-pub trait AsyncReadAndWrite: Unpin + AsyncRead + AsyncWrite + std::fmt::Debug + Send {
-    async fn wait_for_readable(&self) -> anyhow::Result<()>;
-}
+pub trait AsyncReadAndWrite: Unpin + AsyncRead + AsyncWrite + std::fmt::Debug + Send {}
 
 #[async_trait(?Send)]
 impl<T> AsyncReadAndWrite for Async<T>
@@ -530,9 +694,6 @@ where
     T: Send,
     T: async_io::IoSafe,
 {
-    async fn wait_for_readable(&self) -> anyhow::Result<()> {
-        Ok(self.readable().await?)
-    }
 }
 
 #[derive(Debug)]
@@ -540,6 +701,7 @@ struct Reconnectable {
     config: ClientDomainConfig,
     stream: Option<Box<dyn AsyncReadAndWrite>>,
     tls_creds: Option<GetTlsCredsResponse>,
+    quic_creds: Option<(GetQuicCredsResponse, std::time::SystemTime)>,
 }
 
 struct SshStream {
@@ -604,6 +766,7 @@ impl Reconnectable {
             config,
             stream,
             tls_creds: None,
+            quic_creds: None,
         }
     }
 
@@ -620,6 +783,7 @@ impl Reconnectable {
     fn tls_creds_cert_path(&self) -> anyhow::Result<PathBuf> {
         Ok(self.tls_creds_path()?.join("cert.pem"))
     }
+
 
     fn take_stream(&mut self) -> Option<Box<dyn AsyncReadAndWrite>> {
         self.stream.take()
@@ -861,74 +1025,36 @@ impl Reconnectable {
         if let Some(Ok(ssh_params)) = tls_client.ssh_parameters() {
             if self.tls_creds.is_none() {
                 // We need to bootstrap via an ssh session
+                let sess = crate::ssh_bootstrap::establish_ssh_session(&ssh_params, ui)?;
 
-                let mut ssh_config = wezterm_ssh::Config::new();
-                ssh_config.add_default_config_files();
-
-                let mut fields = ssh_params.host_and_port.split(':');
-                let host = fields
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("no host component somehow"))?;
-                let port = fields.next();
-
-                let mut ssh_config = ssh_config.for_host(host);
-                if let Some(username) = &ssh_params.username {
-                    ssh_config.insert("user".to_string(), username.to_string());
-                }
-                if let Some(port) = port {
-                    ssh_config.insert("port".to_string(), port.to_string());
-                }
-
-                let sess = ssh_connect_with_ui(ssh_config, ui)?;
+                let cmd = format!(
+                    "{} cli tlscreds",
+                    Self::wezterm_bin_path(&tls_client.remote_wezterm_path)
+                );
+                ui.output_str(&format!("Running: {}\n", cmd));
 
                 let creds = ui.run_and_log_error(|| {
                     // The `tlscreds` command will start the server if needed and then
                     // obtain client credentials that we can use for tls.
-                    let cmd = format!(
-                        "{} cli tlscreds",
-                        Self::wezterm_bin_path(&tls_client.remote_wezterm_path)
-                    );
-
-                    ui.output_str(&format!("Running: {}\n", cmd));
-                    let mut exec = smol::block_on(sess.exec(&cmd, None))
-                        .with_context(|| format!("executing `{}` on remote host", cmd))?;
-
-                    log::debug!("waiting for command to finish");
-                    let status = exec.child.wait()?;
-                    if !status.success() {
-                        anyhow::bail!("{} failed", cmd);
-                    }
-
-                    drop(exec.stdin);
-
-                    let mut stderr = exec.stderr;
-                    thread::spawn(move || {
-                        // stderr is ideally empty
-                        let mut err = String::new();
-                        let _ = stderr.read_to_string(&mut err);
-                        if !err.is_empty() {
-                            log::error!("remote: `{}` stderr -> `{}`", cmd, err);
-                        }
-                    });
-
-                    let creds = match Pdu::decode(exec.stdout)
-                        .context("reading tlscreds response")?
-                        .pdu
-                    {
-                        Pdu::GetTlsCredsResponse(creds) => creds,
-                        _ => bail!("unexpected response to tlscreds"),
-                    };
-
-                    // Save the credentials to disk, as that is currently the easiest
-                    // way to get them into openssl.  Ideally we'd keep these entirely
-                    // in memory.
-                    std::fs::write(&self.tls_creds_ca_path()?, creds.ca_cert_pem.as_bytes())?;
-                    std::fs::write(
-                        &self.tls_creds_cert_path()?,
-                        creds.client_cert_pem.as_bytes(),
-                    )?;
-                    log::info!("got TLS creds");
-                    Ok(creds)
+                    crate::ssh_bootstrap::execute_remote_command_for_pdu(
+                        &sess,
+                        cmd.clone(),
+                        |pdu| match pdu {
+                            Pdu::GetTlsCredsResponse(creds) => {
+                                log::info!("got TLS creds");
+                                // Save the credentials to disk, as that is currently the easiest
+                                // way to get them into openssl.  Ideally we'd keep these entirely
+                                // in memory.
+                                std::fs::write(&self.tls_creds_ca_path()?, creds.ca_cert_pem.as_bytes())?;
+                                std::fs::write(
+                                    &self.tls_creds_cert_path()?,
+                                    creds.client_cert_pem.as_bytes(),
+                                )?;
+                                Ok(creds)
+                            }
+                            _ => bail!("unexpected response to tlscreds"),
+                        },
+                    )
                 })?;
                 self.tls_creds.replace(creds);
             }
@@ -1038,16 +1164,138 @@ impl Reconnectable {
         Ok(stream)
     }
 
+    /// Try to establish a QUIC connection with given credentials
+    /// Returns the stream on success (caller is responsible for storing it)
+    #[cfg(feature = "quic")]
+    fn try_quic_connect(
+        &self,
+        remote_address: &str,
+        creds: &codec::GetQuicCredsResponse,
+        quic_client: &config::QuicDomainClient,
+        source_description: &str,
+    ) -> anyhow::Result<Box<dyn AsyncReadAndWrite>> {
+        use crate::quic_client;
+
+        match smol::block_on(quic_client::establish_quic_connection(
+            remote_address,
+            Some(creds.client_cert_pem.clone()),
+            Some(creds.ca_cert_pem.clone()),
+            Some(quic_client),
+        )) {
+            Ok(stream) => {
+                log::info!("QUIC connection established from {}", source_description);
+                Ok(stream)
+            }
+            Err(err) => {
+                log::debug!("QUIC connect with {} failed: {}", source_description, err);
+                Err(err)
+            }
+        }
+    }
+
     pub fn quic_connect(
         &mut self,
-        _quic_client: config::QuicDomainClient,
+        quic_client: config::QuicDomainClient,
         _initial: bool,
         ui: &mut ConnectionUI,
     ) -> anyhow::Result<()> {
         #[cfg(feature = "quic")]
         {
-            ui.output_str("QUIC transport not yet fully implemented\n");
-            bail!("QUIC transport not yet fully implemented");
+            let remote_address = &quic_client.remote_address;
+
+            // Check if certs are expired
+            let certs_expired = self.is_quic_cert_expired();
+
+            // Only try cached credentials if cert isn't expired
+            if !certs_expired && self.quic_creds.is_some() {
+                // Use reference to cached credentials
+                if let Some((creds, _)) = &self.quic_creds {
+                    log::debug!("Trying direct QUIC connection with cached credentials");
+                    match self.try_quic_connect(&remote_address, creds, &quic_client, "cached creds") {
+                        Ok(stream) => {
+                            self.stream.replace(stream);
+                            ui.output_str(&format!(
+                                "QUIC Connected to {} (cached creds)!\n",
+                                remote_address
+                            ));
+                            return Ok(());
+                        }
+                        Err(_) => {
+                            // Fall through to SSH bootstrap
+                        }
+                    }
+                }
+            }
+
+            // SSH bootstrap for certificate exchange
+            if let Some(Ok(ssh_params)) = quic_client.ssh_parameters() {
+                ui.output_str("Bootstrapping QUIC credentials via SSH...\n");
+
+                let sess = crate::ssh_bootstrap::establish_ssh_session(&ssh_params, ui)?;
+
+                // Execute quiccreds command to get certificates
+                let cmd = format!(
+                    "{} cli quiccreds",
+                    Self::wezterm_bin_path(&quic_client.remote_wezterm_path)
+                );
+                ui.output_str(&format!("Running: {}\n", cmd));
+
+                let creds = ui.run_and_log_error(|| {
+                    crate::ssh_bootstrap::execute_remote_command_for_pdu(
+                        &sess,
+                        cmd.clone(),
+                        |pdu| match pdu {
+                            Pdu::GetQuicCredsResponse(creds) => {
+                                log::info!("got QUIC creds");
+                                Ok(creds)
+                            }
+                            _ => bail!("unexpected response to quiccreds"),
+                        },
+                    )
+                })?;
+
+                // Save to disk if configured
+                self.save_quic_creds_to_disk(&creds)?;
+
+                // Now connect with the obtained credentials
+                log::info!("SSH bootstrap complete, now establishing QUIC connection to {}", remote_address);
+                let stream = self.try_quic_connect(
+                    &remote_address,
+                    &creds,
+                    &quic_client,
+                    "SSH bootstrap",
+                )?;
+
+                // Store stream and credentials in memory with timestamp
+                self.stream.replace(stream);
+                self.quic_creds
+                    .replace((creds, std::time::SystemTime::now()));
+                ui.output_str(&format!("QUIC Connected to {}!\n", remote_address));
+                Ok(())
+            } else {
+                // No SSH bootstrap - try to load credentials from disk if persist_to_disk is set
+                if self.quic_creds.is_none() && !certs_expired {
+                    if let Ok(Some(creds)) = self.load_quic_creds_from_disk() {
+                        log::debug!("Loaded QUIC credentials from disk, trying direct connection");
+                        match self.try_quic_connect(&remote_address, &creds, &quic_client, "disk creds") {
+                            Ok(stream) => {
+                                self.stream.replace(stream);
+                                self.quic_creds
+                                    .replace((creds, std::time::SystemTime::now()));
+                                ui.output_str(&format!(
+                                    "QUIC Connected to {} (disk creds)!\n",
+                                    remote_address
+                                ));
+                                return Ok(());
+                            }
+                            Err(_) => {
+                                // Failed to connect with disk creds, continue to error
+                            }
+                        }
+                    }
+                }
+                bail!("No SSH bootstrap configured and no usable QUIC credentials found");
+            }
         }
         #[cfg(not(feature = "quic"))]
         {
@@ -1335,12 +1583,15 @@ impl Client {
 
     pub async fn send_pdu(&self, pdu: Pdu) -> anyhow::Result<Pdu> {
         let (promise, rx) = bounded(1);
+        log::debug!("Sending PDU: {pdu:?}");
         self.sender
-            .send(ReaderMessage::SendPdu { pdu, promise })
+            .send(SendPduMessage { pdu, promise })
             .await
             .map_err(|_| ChannelSendError)
             .context("send_pdu send")?;
-        rx.recv().await.context("send_pdu recv")?
+        let res = rx.recv().await.context("send_pdu recv")?;
+        log::debug!("Received PDU: {res:?}");
+        res
     }
 
     pub async fn resolve_pane_id(&self, pane_id: Option<PaneId>) -> anyhow::Result<PaneId> {
