@@ -381,6 +381,7 @@ mod quic_creds {
     }
 
     impl Reconnectable {
+        #[allow(dead_code)]
         pub(super) fn quic_creds_path(&self) -> anyhow::Result<PathBuf> {
             creds_path(&self.config)
         }
@@ -701,6 +702,7 @@ struct Reconnectable {
     config: ClientDomainConfig,
     stream: Option<Box<dyn AsyncReadAndWrite>>,
     tls_creds: Option<GetTlsCredsResponse>,
+    #[allow(dead_code)]
     quic_creds: Option<(GetQuicCredsResponse, std::time::SystemTime)>,
 }
 
@@ -1195,12 +1197,13 @@ impl Reconnectable {
 
     pub fn quic_connect(
         &mut self,
-        quic_client: config::QuicDomainClient,
+        _quic_client: config::QuicDomainClient,
         _initial: bool,
         ui: &mut ConnectionUI,
     ) -> anyhow::Result<()> {
         #[cfg(feature = "quic")]
         {
+            let quic_client = _quic_client;
             let remote_address = &quic_client.remote_address;
 
             // Check if certs are expired

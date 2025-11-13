@@ -252,9 +252,6 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
         quinn::IdleTimeout::try_from(quic_server.max_idle_timeout)
             .context("Invalid max_idle_timeout")?,
     ));
-    if let Some(keep_alive) = quic_server.keep_alive_interval {
-        transport.keep_alive_interval(Some(keep_alive));
-    }
     quinn_config.transport_config(Arc::new(transport));
 
     // Bind UDP socket

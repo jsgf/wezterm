@@ -8,7 +8,7 @@ pub struct QuicDomainServer {
     /// for client connections
     pub bind_address: String,
 
-    /// Certificate lifetime in days (default 7)
+    /// Ephemeral certificate lifetime in days (default 7)
     #[dynamic(default = "default_certificate_lifetime_days")]
     pub certificate_lifetime_days: u32,
 
@@ -32,9 +32,6 @@ pub struct QuicDomainServer {
     /// Maximum idle timeout for QUIC connections
     #[dynamic(default = "default_max_idle_timeout")]
     pub max_idle_timeout: Duration,
-
-    /// Keep-alive interval for QUIC connections
-    pub keep_alive_interval: Option<Duration>,
 }
 
 #[derive(Default, Debug, Clone, FromDynamic, ToDynamic)]
@@ -104,6 +101,9 @@ pub struct QuicDomainClient {
     /// the hostname portion of the `remote_address` configuration and you
     /// should not normally need to override this value.
     pub expected_cn: Option<String>,
+
+    /// Keep-alive interval for QUIC connections
+    pub keep_alive_interval: Option<Duration>,
 
     /// If true, connect to this domain automatically at startup
     #[dynamic(default)]
