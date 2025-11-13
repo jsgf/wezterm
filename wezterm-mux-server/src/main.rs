@@ -230,10 +230,12 @@ fn run() -> anyhow::Result<()> {
 
     let executor = promise::spawn::SimpleExecutor::new();
 
+    log::info!("About to call spawn_listener()");
     spawn_listener().map_err(|e| {
         log::error!("problem spawning listeners: {:?}", e);
         e
     })?;
+    log::info!("spawn_listener() completed successfully");
 
     let activity = Activity::new();
 
@@ -261,6 +263,17 @@ async fn trigger_mux_startup(lua: Option<Rc<mlua::Lua>>) -> anyhow::Result<()> {
 async fn async_run(cmd: Option<CommandBuilder>) -> anyhow::Result<()> {
     let mux = Mux::get();
     let config = config::configuration();
+
+    log::info!("Config loaded: quic_clients count = {}, quic_servers count = {}, unix_domains count = {}, tls_clients count = {}",
+        config.quic_clients.len(), config.quic_servers.len(), config.unix_domains.len(), config.tls_clients.len());
+
+    for quic_server in &config.quic_servers {
+        log::info!("QUIC server found in config: {}", quic_server.bind_address);
+    }
+
+    for quic in &config.quic_clients {
+        log::info!("QUIC client found in config: {}", quic.name);
+    }
 
     update_mux_domains_for_server(&config)?;
     let _config_subscription = config::subscribe_to_config_reload(move || {
@@ -306,10 +319,14 @@ fn terminate_with_error(err: anyhow::Error) -> ! {
 }
 
 mod ossl;
+#[cfg(feature = "quic")]
 mod quic_server;
 
 pub fn spawn_listener() -> anyhow::Result<()> {
     let config = configuration();
+    log::info!("spawn_listener called: {} unix domains, {} tls servers, {} quic servers",
+        config.unix_domains.len(), config.tls_servers.len(), config.quic_servers.len());
+
     for unix_dom in &config.unix_domains {
         std::env::set_var("WEZTERM_UNIX_SOCKET", unix_dom.socket_path());
         let mut listener = wezterm_mux_server_impl::local::LocalListener::with_domain(unix_dom)?;
@@ -322,8 +339,18 @@ pub fn spawn_listener() -> anyhow::Result<()> {
         ossl::spawn_tls_listener(tls_server)?;
     }
 
-    for quic_server in &config.quic_servers {
-        quic_server::spawn_quic_listener(quic_server)?;
+    #[cfg(feature = "quic")]
+    {
+        log::info!("QUIC feature is enabled, spawning {} QUIC listeners", config.quic_servers.len());
+        for (idx, quic_server) in config.quic_servers.iter().enumerate() {
+            log::info!("Spawning QUIC listener {}: {}", idx, quic_server.bind_address);
+            quic_server::spawn_quic_listener(quic_server)?;
+        }
+    }
+
+    #[cfg(not(feature = "quic"))]
+    {
+        log::warn!("QUIC feature is NOT enabled");
     }
 
     Ok(())

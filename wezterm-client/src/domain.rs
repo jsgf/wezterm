@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use codec::{ListPanesResponse, SpawnV2, SplitPane};
 use config::keyassignment::SpawnTabDomain;
-use config::{SshDomain, TlsDomainClient, UnixDomain, QuicDomainClient};
+use config::{QuicDomainClient, SshDomain, TlsDomainClient, UnixDomain};
 use mux::connui::{ConnectionUI, ConnectionUIParams};
 use mux::domain::{alloc_domain_id, Domain, DomainId, DomainState, SplitSource};
 use mux::pane::{Pane, PaneId};
@@ -968,7 +968,9 @@ impl Domain for ClientDomain {
                     }
                     ClientDomainConfig::Tls(tls) => Client::new_tls(domain_id, tls, &mut cloned_ui),
                     ClientDomainConfig::Ssh(ssh) => Client::new_ssh(domain_id, ssh, &mut cloned_ui),
-                    ClientDomainConfig::Quic(quic) => Client::new_quic(domain_id, quic, &mut cloned_ui),
+                    ClientDomainConfig::Quic(quic) => {
+                        Client::new_quic(domain_id, quic, &mut cloned_ui)
+                    }
                 })
                 .await?;
 
