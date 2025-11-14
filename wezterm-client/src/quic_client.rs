@@ -16,6 +16,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
+#[cfg(feature = "quic")]
+use x509_parser::prelude::*;
+
 /// Wraps a quinn bidirectional stream to implement AsyncReadAndWrite
 ///
 /// Quinn provides futures-based streams which we adapt to the AsyncRead/AsyncWrite
@@ -234,6 +237,25 @@ impl ServerCertVerifier for NoHostnameVerification {
     }
 }
 
+/// Extract CN (Common Name) from a certificate
+/// Returns the CN value if found, None otherwise
+#[cfg(feature = "quic")]
+fn extract_cn_from_certificate(cert_der: &CertificateDer<'_>) -> anyhow::Result<String> {
+    let (_remainder, parsed) = parse_x509_certificate(cert_der.as_ref())
+        .context("Failed to parse X.509 certificate")?;
+
+    let subject = &parsed.tbs_certificate.subject;
+
+    // Look for CommonName attribute in the subject DN
+    for rdn in subject.iter_common_name() {
+        if let Ok(cn) = rdn.as_str() {
+            return Ok(cn.to_string());
+        }
+    }
+
+    Err(anyhow!("Certificate has no CommonName (CN) attribute"))
+}
+
 /// Custom verifier that validates certificate chain and a specific CN
 /// Used when accept_invalid_hostnames is true but expected_cn is set
 /// Validates certificate was signed by trusted CA, has not expired, and has expected CN
@@ -251,28 +273,30 @@ impl SpecificCNVerification {
         Self { verifier, expected_cn }
     }
 
-    /// Check if certificate CN matches expected CN
-    /// This is a simple check that looks for "CN=<expected_cn>" in the subject
+    /// Check if certificate CN matches expected CN using proper X.509 parsing
     fn verify_cn(&self, end_entity: &CertificateDer<'_>) -> bool {
-        // Convert certificate to DER bytes and look for CN in subject
-        // This is a simple substring search for "CN=" field
-        let cert_der = &end_entity.as_ref();
-
-        // Look for CN in the DER-encoded certificate
-        // In DER, the CN OID is 2.5.4.3, but we'll do a simpler check
-        // Convert to string and look for CN= (this works if the cert is ASCII-encodable)
-        // For a more robust approach, we'd use an X.509 parser
-        let cert_str = String::from_utf8_lossy(cert_der);
-
-        if cert_str.contains(&format!("CN={}", self.expected_cn)) {
-            true
-        } else {
-            // Also check for the CN in a more general way (might be in different formats)
-            log::debug!(
-                "Certificate CN verification failed: expected CN='{}' not found in certificate",
-                self.expected_cn
-            );
-            false
+        match extract_cn_from_certificate(end_entity) {
+            Ok(cn) => {
+                if cn == self.expected_cn {
+                    log::trace!(
+                        "QUIC client: Certificate CN '{}' matches expected CN '{}'",
+                        cn,
+                        self.expected_cn
+                    );
+                    true
+                } else {
+                    log::error!(
+                        "QUIC client: Certificate CN '{}' does not match expected CN '{}'",
+                        cn,
+                        self.expected_cn
+                    );
+                    false
+                }
+            }
+            Err(e) => {
+                log::error!("QUIC client: Failed to extract CN from certificate: {}", e);
+                false
+            }
         }
     }
 }

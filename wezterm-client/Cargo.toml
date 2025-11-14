@@ -7,7 +7,7 @@ publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-quic = ["quinn", "webpki-roots", "quinn-proto", "futures-lite", "rustls-pemfile", "config/quic"]
+quic = ["quinn", "webpki-roots", "quinn-proto", "futures-lite", "rustls-pemfile", "x509-parser", "config/quic"]
 
 [dependencies]
 anyhow.workspace = true
@@ -45,6 +45,7 @@ webpki-roots = { workspace = true, optional = true }
 quinn-proto = { workspace = true, optional = true }
 futures-lite = { workspace = true, optional = true }
 rustls-pemfile = { version = "2", optional = true }
+x509-parser = { version = "0.16", optional = true }
 
 [target."cfg(windows)".dependencies]
 winapi = { workspace=true, features = [
