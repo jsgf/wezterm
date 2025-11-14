@@ -9,6 +9,8 @@ publish = false
 
 [dev-dependencies]
 env_logger.workspace = true
+x509-parser = { workspace = true }
+rustls-pemfile = { version = "2" }
 
 [features]
 default = []
