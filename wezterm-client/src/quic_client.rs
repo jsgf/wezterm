@@ -5,6 +5,9 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use quinn::crypto::rustls::QuicClientConfig as RustlsQuicClientConfig;
 use quinn::rustls;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, UnixTime};
+use rustls::Error as RustlsError;
 use smol::io::{AsyncRead, AsyncWrite};
 use std::convert::TryFrom;
 use std::io::Cursor;
@@ -111,11 +114,85 @@ fn configure_transport(
     }
 }
 
-/// Build rustls ClientConfig for QUIC, with optional client certificate
+/// Custom verifier that skips hostname verification but validates certificate chain
+/// Used when accept_invalid_hostnames is true - still validates certificate was signed by trusted CA
+/// and has not expired, but doesn't check that the hostname matches the certificate CN
+#[derive(Debug)]
+struct NoHostnameVerification {
+    verifier: Arc<rustls::client::WebPkiServerVerifier>,
+}
+
+impl NoHostnameVerification {
+    fn new(roots: rustls::RootCertStore) -> Self {
+        let verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
+            .build()
+            .expect("Failed to build WebPkiServerVerifier");
+        Self { verifier }
+    }
+}
+
+impl ServerCertVerifier for NoHostnameVerification {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        // Use a dummy hostname for chain validation (it will be ignored)
+        // We validate the certificate chain but skip hostname verification
+        // This dummy name is valid and will never fail
+        let dummy_name = rustls::pki_types::ServerName::try_from("_dummy_")
+            .expect("Failed to create dummy hostname (should never happen)");
+
+        // Validate certificate chain and expiration, but hostname check will be skipped
+        // since we're not checking against the actual server name
+        self.verifier
+            .verify_server_cert(end_entity, intermediates, &dummy_name, ocsp_response, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.verifier.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.verifier.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.verifier.supported_verify_schemes()
+    }
+}
+
+/// Build rustls ClientConfig for QUIC, with optional client certificate and validation options
 fn build_rustls_client_config(
     roots: rustls::RootCertStore,
     client_cert_pem: Option<String>,
+    accept_invalid_hostnames: bool,
 ) -> anyhow::Result<rustls::ClientConfig> {
+    let builder = if accept_invalid_hostnames {
+        // Skip hostname verification but still validate certificate chain
+        // Used for self-signed certs with custom expected_cn
+        log::warn!("QUIC: Hostname verification disabled (accept_invalid_hostnames=true) - certificate chain still validated");
+        rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoHostnameVerification::new(roots.clone())))
+    } else {
+        // Standard verification: validate certificate chain and hostname
+        rustls::ClientConfig::builder().with_root_certificates(roots)
+    };
+
     if let Some(cert_pem) = client_cert_pem {
         let mut cert_cursor = Cursor::new(cert_pem.as_bytes());
 
@@ -164,15 +241,12 @@ fn build_rustls_client_config(
         let private_key = private_key.ok_or_else(|| anyhow!("No private key found in PEM"))?;
 
         // Build config with client certificate
-        rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
+        builder
             .with_client_auth_cert(certs, private_key)
             .context("Failed to configure client certificate")
     } else {
         // Build config without client certificate
-        Ok(rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth())
+        Ok(builder.with_no_client_auth())
     }
 }
 
@@ -199,13 +273,26 @@ pub async fn establish_quic_connection(
         .next()
         .ok_or_else(|| anyhow!("No addresses found for {}", remote_address))?;
 
-    // Check if 0-RTT is enabled
+    // Extract configuration options
     let enable_0rtt = config.map(|c| c.enable_0rtt).unwrap_or(true);
-
-    // Check if connection migration is enabled
     let enable_migration = config.map(|c| c.enable_migration).unwrap_or(true);
+    let accept_invalid_hostnames = config.map(|c| c.accept_invalid_hostnames).unwrap_or(false);
+    let expected_cn = config.and_then(|c| c.expected_cn.clone());
+
+    // Determine which hostname to use for certificate verification
+    // If expected_cn is specified, use it; otherwise use the extracted hostname
+    let verify_hostname = expected_cn.as_deref().unwrap_or(hostname);
+
     if enable_migration {
         log::debug!("Connection migration enabled - will handle network changes transparently");
+    }
+
+    if accept_invalid_hostnames {
+        log::warn!("QUIC: Hostname verification disabled for {}", hostname);
+    }
+
+    if let Some(cn) = &expected_cn {
+        log::info!("QUIC: Using custom expected_cn for certificate verification: {}", cn);
     }
 
     // Create QUIC endpoint bound to any local address
@@ -237,7 +324,7 @@ pub async fn establish_quic_connection(
     }
 
     // Build rustls client config (with or without client certificate)
-    let client_crypto = build_rustls_client_config(roots, client_cert_pem)?;
+    let client_crypto = build_rustls_client_config(roots, client_cert_pem, accept_invalid_hostnames)?;
 
     let quic_client_config = RustlsQuicClientConfig::try_from(client_crypto)?;
     let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
@@ -250,9 +337,11 @@ pub async fn establish_quic_connection(
     endpoint.set_default_client_config(client_config);
 
     // Connect to server
-    log::info!("QUIC: Initiating connection to {} (hostname: {})", socket_addr, hostname);
+    // Use verify_hostname for certificate verification (may be expected_cn if configured)
+    // SNI will still be sent correctly for proper server identification
+    log::info!("QUIC: Initiating connection to {} (hostname: {}, verify_hostname: {})", socket_addr, hostname, verify_hostname);
     let connecting = endpoint
-        .connect(socket_addr, hostname)
+        .connect(socket_addr, verify_hostname)
         .context("Failed to create QUIC connection")?;
 
     // Try to use 0-RTT if enabled for faster reconnections

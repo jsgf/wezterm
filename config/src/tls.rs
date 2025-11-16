@@ -24,6 +24,13 @@ pub struct TlsDomainServer {
     /// to the trust store.
     #[dynamic(default)]
     pub pem_root_certs: Vec<PathBuf>,
+
+    /// Additional Subject Alternative Names (SANs) to include in the certificate.
+    /// Useful for servers that accept connections on multiple addresses
+    /// (e.g., hostname, IP addresses, localhost).
+    /// These are merged with auto-generated SANs (bind address, hostname).
+    #[dynamic(default)]
+    pub extra_san: Vec<String>,
 }
 
 #[derive(Default, Debug, Clone, FromDynamic, ToDynamic)]

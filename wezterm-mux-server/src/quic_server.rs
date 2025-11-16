@@ -180,7 +180,7 @@ pub fn spawn_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
 async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()> {
     let listen_addr: std::net::SocketAddr = quic_server.bind_address.parse()?;
 
-    log::debug!(
+    log::info!(
         "QUIC: Generating server certificate with {} day lifetime",
         quic_server.certificate_lifetime_days
     );
@@ -189,7 +189,7 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
     let extra_san = if quic_server.extra_san.is_empty() {
         None
     } else {
-        log::debug!("QUIC: Adding extra SANs to certificate: {:?}", quic_server.extra_san);
+        log::info!("QUIC: Adding extra SANs to certificate: {:?}", quic_server.extra_san);
         Some(quic_server.extra_san.clone())
     };
 

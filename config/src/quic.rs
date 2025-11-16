@@ -32,6 +32,13 @@ pub struct QuicDomainServer {
     /// Maximum idle timeout for QUIC connections
     #[dynamic(default = "default_max_idle_timeout")]
     pub max_idle_timeout: Duration,
+
+    /// Additional Subject Alternative Names (SANs) to include in the certificate.
+    /// Useful for servers that accept connections on multiple addresses
+    /// (e.g., hostname, IP addresses, localhost).
+    /// These are merged with auto-generated SANs (bind address, hostname).
+    #[dynamic(default)]
+    pub extra_san: Vec<String>,
 }
 
 #[derive(Default, Debug, Clone, FromDynamic, ToDynamic)]
