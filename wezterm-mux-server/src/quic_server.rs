@@ -15,6 +15,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
+#[cfg(feature = "quic")]
+use x509_parser::prelude::*;
+
 /// Wraps QUIC streams to implement AsyncRead/AsyncWrite
 #[derive(Debug)]
 pub struct QuicStream {
@@ -162,6 +165,92 @@ pub async fn process_quic_stream(mut stream: QuicStream) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Extract CN (Common Name) from a certificate
+/// Returns the CN value if found, None otherwise
+#[cfg(feature = "quic")]
+fn extract_cn_from_certificate(cert_der: &rustls::pki_types::CertificateDer<'_>) -> anyhow::Result<String> {
+    let (_remainder, parsed) = parse_x509_certificate(cert_der.as_ref())
+        .context("Failed to parse X.509 certificate")?;
+
+    let subject = &parsed.tbs_certificate.subject;
+
+    // Look for CommonName attribute in the subject DN
+    for rdn in subject.iter_common_name() {
+        if let Ok(cn) = rdn.as_str() {
+            return Ok(cn.to_string());
+        }
+    }
+
+    Err(anyhow::anyhow!("Certificate has no CommonName (CN) attribute"))
+}
+
+/// Validate that client certificate CN matches expected user
+/// Accepts both direct match (CN == username) and prefixed format (user:username/)
+#[cfg(feature = "quic")]
+fn validate_client_cn(cn: &str, expected_user: &str) -> anyhow::Result<()> {
+    // Direct match: CN == username
+    if cn == expected_user {
+        log::trace!(
+            "QUIC: Client certificate CN `{}` matches $USER `{}`",
+            cn,
+            expected_user
+        );
+        return Ok(());
+    }
+
+    // Prefixed format: CN starts with "user:<username>/"
+    let prefix = format!("user:{}/", expected_user);
+    if cn.starts_with(&prefix) {
+        log::trace!(
+            "QUIC: Client certificate CN `{}` matches $USER `{}` (prefixed format)",
+            cn,
+            expected_user
+        );
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "QUIC: Client certificate CN `{}` does not match $USER `{}`",
+        cn,
+        expected_user
+    );
+}
+
+/// Verify client certificate CN when client certificate verification is enabled
+/// This is called after the TLS handshake when a client certificate is present
+#[cfg(feature = "quic")]
+fn verify_client_certificate_cn(connection: &quinn::Connection) -> anyhow::Result<()> {
+    // Get peer identity (client certificates)
+    let peer_identity = connection
+        .peer_identity()
+        .ok_or_else(|| anyhow::anyhow!("QUIC: No peer identity available"))?;
+
+    // Cast to Vec<CertificateDer>
+    let certs = peer_identity
+        .downcast_ref::<Vec<rustls::pki_types::CertificateDer<'_>>>()
+        .ok_or_else(|| anyhow::anyhow!("QUIC: Failed to downcast peer identity to certificates"))?;
+
+    // Get the client certificate (first one in chain)
+    let client_cert = certs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("QUIC: Peer identity contains no certificates"))?;
+
+    // Extract CN from client certificate
+    let cn = extract_cn_from_certificate(client_cert)
+        .context("QUIC: Failed to extract CN from client certificate")?;
+
+    // Get expected username from environment
+    let expected_user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .context("QUIC: Failed to get $USER or $USERNAME environment variable")?;
+
+    // Validate CN matches expected user
+    validate_client_cn(&cn, &expected_user)
+        .context("QUIC: Client certificate CN validation failed")?;
+
+    Ok(())
+}
+
 /// Load certificate chain from a PEM file
 fn load_certificates_from_file<P: AsRef<Path>>(
     path: P,
@@ -225,9 +314,10 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
     // Extract private key from PEM
     let server_key = wezterm_mux_server_impl::pki::extract_private_key_from_bytes(cert_data.as_bytes())?;
 
-    // Load client CA for verification if configured, otherwise skip verification
+    // Load client CA for verification if configured
+    // Priority: explicit CA > ephemeral PKI CA (if using ephemeral PKI)
     let server_config = if let Some(ca_path) = &quic_server.pem_ca {
-        // Verify client certs against configured CA
+        // Explicit CA configured
         log::info!("QUIC: Verifying client certificates against CA: {}", ca_path.display());
         let client_ca_certs = load_certificates_from_file(ca_path)
             .context("Failed to load client CA certificate")?;
@@ -271,6 +361,28 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
             )
             .with_single_cert(cert_chain, server_key)
             .context("building server config with client cert verification")?
+    } else if let Ok(ca_pem) = pki.ca_pem_string() {
+        // Use ephemeral PKI CA for client verification when using ephemeral certs
+        log::info!("QUIC: Verifying client certificates against ephemeral PKI CA");
+        let mut cursor = Cursor::new(ca_pem.as_bytes());
+        let ca_certs: Vec<rustls::pki_types::CertificateDer> = rustls_pemfile::certs(&mut cursor)
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to parse ephemeral PKI CA certificate")?;
+
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in ca_certs {
+            roots.add(cert)
+                .context("Failed to add ephemeral PKI CA certificate to root store")?;
+        }
+
+        rustls::ServerConfig::builder()
+            .with_client_cert_verifier(
+                rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+                    .build()
+                    .context("Failed to build client cert verifier")?,
+            )
+            .with_single_cert(cert_chain, server_key)
+            .context("building server config with ephemeral PKI client cert verification")?
     } else {
         // No client CA configured, skip verification
         log::debug!("QUIC: No client CA configured, skipping client certificate verification");
@@ -327,6 +439,18 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
 
                 let peer_addr = connection.remote_address();
                 log::info!("QUIC connection from {}", peer_addr);
+
+                // Verify client certificate CN if client certs are being validated
+                #[cfg(feature = "quic")]
+                if connection.peer_identity().is_some() {
+                    if let Err(e) = verify_client_certificate_cn(&connection) {
+                        log::error!("QUIC: Client CN validation failed for {}: {}", peer_addr, e);
+                        // Close the connection on CN validation failure
+                        connection.close(1u32.into(), b"CN validation failed");
+                        continue;
+                    }
+                    log::info!("QUIC: Client CN validation successful for {}", peer_addr);
+                }
 
                 // Spawn connection handler in smol executor (we're in a separate thread with smol::block_on)
                 log::debug!("QUIC: Spawning connection handler for {}", peer_addr);

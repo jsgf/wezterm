@@ -35,9 +35,10 @@ rustls-pemfile = { version = "2", optional = true }
 smol = { workspace = true, optional = true }
 futures-lite = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
+x509-parser = { version = "0.16", optional = true }
 
 [features]
-quic = ["quinn", "quinn-proto", "webpki-roots", "wezterm-client", "rustls-pemfile", "smol", "futures-lite", "futures", "config/quic", "wezterm-mux-server-impl/quic"]
+quic = ["quinn", "quinn-proto", "webpki-roots", "wezterm-client", "rustls-pemfile", "smol", "futures-lite", "futures", "x509-parser", "config/quic", "wezterm-mux-server-impl/quic"]
 
 [target."cfg(windows)".dependencies]
 winapi = { workspace=true, features = [ "winuser" ]}
