@@ -9,6 +9,8 @@ use winapi::shared::ws2def::{AF_UNSPEC, AI_CANONNAME, SOCK_DGRAM};
 
 #[cfg(feature = "quic")]
 use std::io::{BufReader, Cursor};
+#[cfg(feature = "quic")]
+use quinn::rustls;
 
 /// Extract private key from PEM data
 /// Looks through all PEM items to find the first private key
