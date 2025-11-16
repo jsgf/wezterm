@@ -1,7 +1,7 @@
 // QUIC server implementation
 // Handles QUIC endpoint setup and connection acceptance
 
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use codec::{DecodedPdu, Pdu};
 use config::QuicDomainServer;
 use futures::FutureExt;
@@ -9,6 +9,8 @@ use mux::{Mux, MuxNotification};
 use quinn::rustls;
 use smol::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use std::convert::TryFrom;
+use std::io::{Cursor, Read};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
@@ -160,6 +162,23 @@ pub async fn process_quic_stream(mut stream: QuicStream) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Load certificate chain from a PEM file
+fn load_certificates_from_file<P: AsRef<Path>>(
+    path: P,
+) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let path = path.as_ref();
+    let mut file = std::fs::File::open(path)
+        .context(format!("Failed to open certificate file: {}", path.display()))?;
+    let mut content = Vec::new();
+    file.read_to_end(&mut content)
+        .context(format!("Failed to read certificate file: {}", path.display()))?;
+
+    let mut cursor = Cursor::new(&content);
+    rustls_pemfile::certs(&mut cursor)
+        .collect::<Result<Vec<_>, _>>()
+        .context(format!("Failed to parse certificates from: {}", path.display()))
+}
+
 /// Spawn a QUIC listener for the given configuration
 /// Like TLS, we run this in a separate thread with its own smol::block_on executor
 /// This avoids executor incompatibility with async-executor used by promise::spawn
@@ -206,16 +225,60 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
     // Extract private key from PEM
     let server_key = wezterm_mux_server_impl::pki::extract_private_key_from_bytes(cert_data.as_bytes())?;
 
-    // NOTE: For testing, we skip client certificate verification.
-    // The connection is already authenticated via SSH bootstrap, so we don't need
-    // to verify the client's certificate signed by a CA. The client just needs a cert
-    // for the TLS handshake. This avoids the issue of server and quiccreds
-    // subprocess generating different CAs.
-    // In production, this should be replaced with proper client cert verification.
-    let server_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, server_key)
-        .context("building server config")?;
+    // Load client CA for verification if configured, otherwise skip verification
+    let server_config = if let Some(ca_path) = &quic_server.pem_ca {
+        // Verify client certs against configured CA
+        log::info!("QUIC: Verifying client certificates against CA: {}", ca_path.display());
+        let client_ca_certs = load_certificates_from_file(ca_path)
+            .context("Failed to load client CA certificate")?;
+
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in client_ca_certs {
+            roots.add(cert)
+                .context("Failed to add client CA certificate to root store")?;
+        }
+
+        rustls::ServerConfig::builder()
+            .with_client_cert_verifier(
+                rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+                    .build()
+                    .context("Failed to build client cert verifier")?,
+            )
+            .with_single_cert(cert_chain, server_key)
+            .context("building server config with client cert verification")?
+    } else if !quic_server.pem_root_certs.is_empty() {
+        // Load additional CAs for client verification
+        log::info!(
+            "QUIC: Verifying client certificates against {} root CA(s)",
+            quic_server.pem_root_certs.len()
+        );
+        let mut roots = rustls::RootCertStore::empty();
+
+        for ca_path in &quic_server.pem_root_certs {
+            let certs = load_certificates_from_file(ca_path)
+                .context("Failed to load root CA certificate")?;
+            for cert in certs {
+                roots.add(cert)
+                    .context("Failed to add root CA certificate")?;
+            }
+        }
+
+        rustls::ServerConfig::builder()
+            .with_client_cert_verifier(
+                rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+                    .build()
+                    .context("Failed to build client cert verifier")?,
+            )
+            .with_single_cert(cert_chain, server_key)
+            .context("building server config with client cert verification")?
+    } else {
+        // No client CA configured, skip verification
+        log::debug!("QUIC: No client CA configured, skipping client certificate verification");
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, server_key)
+            .context("building server config")?
+    };
 
     // Create Quinn ServerConfig from rustls
     let quinn_crypto_config = quinn::crypto::rustls::QuicServerConfig::try_from(server_config)
