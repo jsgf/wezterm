@@ -1,2 +1,4 @@
 - wezterm uses WEZTERM_LOG to control log levels and filtering
 - All changes must be validated with `cargo check`, with all relevant feature combinations
+- Quinn source is in /home/jeremy/git/quinn
+- Always keep updates to Claude files (CLAUDE.md, plans, reports, etc) as separate commits
