@@ -1347,9 +1347,10 @@ impl Client {
                     ui.title("wezterm: Reconnecting...");
 
                     loop {
-                        ui.sleep_with_reason(
+                        ui.sleep_with_deferred_progress(
                             &format!("client disconnected {}; will reconnect", e),
                             backoff,
+                            None,
                         )
                         .ok();
                         let initial = false;

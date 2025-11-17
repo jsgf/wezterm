@@ -288,7 +288,7 @@ pub fn spawn_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
 async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()> {
     let listen_addr: std::net::SocketAddr = quic_server.bind_address.parse()?;
 
-    log::info!(
+    log::debug!(
         "QUIC: Generating server certificate with {} day lifetime",
         quic_server.certificate_lifetime_days
     );
@@ -297,7 +297,7 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
     let extra_san = if quic_server.extra_san.is_empty() {
         None
     } else {
-        log::info!("QUIC: Adding extra SANs to certificate: {:?}", quic_server.extra_san);
+        log::debug!("QUIC: Adding extra SANs to certificate: {:?}", quic_server.extra_san);
         Some(quic_server.extra_san.clone())
     };
 
@@ -318,7 +318,7 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
     // Priority: explicit CA > ephemeral PKI CA (if using ephemeral PKI)
     let server_config = if let Some(ca_path) = &quic_server.pem_ca {
         // Explicit CA configured
-        log::info!("QUIC: Verifying client certificates against CA: {}", ca_path.display());
+        log::debug!("QUIC: Verifying client certificates against CA: {}", ca_path.display());
         let client_ca_certs = load_certificates_from_file(ca_path)
             .context("Failed to load client CA certificate")?;
 
@@ -338,7 +338,7 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
             .context("building server config with client cert verification")?
     } else if !quic_server.pem_root_certs.is_empty() {
         // Load additional CAs for client verification
-        log::info!(
+        log::debug!(
             "QUIC: Verifying client certificates against {} root CA(s)",
             quic_server.pem_root_certs.len()
         );
@@ -363,7 +363,7 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
             .context("building server config with client cert verification")?
     } else if let Ok(ca_pem) = pki.ca_pem_string() {
         // Use ephemeral PKI CA for client verification when using ephemeral certs
-        log::info!("QUIC: Verifying client certificates against ephemeral PKI CA");
+        log::debug!("QUIC: Verifying client certificates against ephemeral PKI CA");
         let mut cursor = Cursor::new(ca_pem.as_bytes());
         let ca_certs: Vec<rustls::pki_types::CertificateDer> = rustls_pemfile::certs(&mut cursor)
             .collect::<Result<Vec<_>, _>>()
@@ -417,7 +417,7 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
     let endpoint = quinn::Endpoint::new(Default::default(), Some(quinn_config), socket, runtime)
         .context("creating QUIC endpoint")?;
 
-    log::info!("QUIC server successfully created endpoint and listening on {}", listen_addr);
+    log::debug!("QUIC server successfully created endpoint and listening on {}", listen_addr);
 
     // Run the accept loop in this thread's smol executor
     log::debug!("QUIC: Starting main accept loop");
@@ -428,7 +428,7 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
                 log::debug!("QUIC: Got Connecting, waiting for handshake completion");
                 let connection = match connecting.await {
                     Ok(conn) => {
-                        log::info!("QUIC: Handshake completed successfully");
+                        log::debug!("QUIC: Handshake completed successfully");
                         conn
                     }
                     Err(e) => {
@@ -449,7 +449,7 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
                         connection.close(1u32.into(), b"CN validation failed");
                         continue;
                     }
-                    log::info!("QUIC: Client CN validation successful for {}", peer_addr);
+                    log::debug!("QUIC: Client CN validation successful for {}", peer_addr);
                 }
 
                 // Spawn connection handler in smol executor (we're in a separate thread with smol::block_on)
@@ -460,7 +460,7 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
                         log::debug!("QUIC: Waiting for stream from {} with accept_bi().await", peer_addr);
                         match connection.accept_bi().await {
                             Ok((send, recv)) => {
-                                log::info!("Accepted QUIC stream from {}", peer_addr);
+                                log::debug!("Accepted QUIC stream from {}", peer_addr);
                                 let stream = QuicStream::new(send, recv);
 
                                 // Process each stream in-place (sequential per connection)
@@ -471,7 +471,7 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
                                 log::debug!("QUIC: Stream processing complete for {}", peer_addr);
                             }
                             Err(e) => {
-                                log::info!("No more streams from {}: {}", peer_addr, e);
+                                log::debug!("No more streams from {}: {}", peer_addr, e);
                                 break;
                             }
                         }
@@ -482,7 +482,7 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
                 log::debug!("QUIC: Connection handler spawned for {}", peer_addr);
             }
             None => {
-                log::info!("QUIC endpoint closed");
+                log::debug!("QUIC endpoint closed");
                 break;
             }
         }

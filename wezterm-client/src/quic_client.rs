@@ -486,7 +486,7 @@ pub async fn establish_quic_connection(
     }
 
     if let Some(cn) = &expected_cn {
-        log::info!("QUIC: Using custom expected_cn for certificate verification: {}", cn);
+        log::debug!("QUIC: Using custom expected_cn for certificate verification: {}", cn);
     }
 
     // Create QUIC endpoint bound to any local address
@@ -508,7 +508,7 @@ pub async fn establish_quic_connection(
         if let Some(ca_path) = &cfg.pem_ca {
             match load_certificates_from_file(ca_path) {
                 Ok(certs) => {
-                    log::info!("QUIC: Loading CA certificate from file: {}", ca_path.display());
+                    log::debug!("QUIC: Loading CA certificate from file: {}", ca_path.display());
                     for cert in certs {
                         roots
                             .add(cert)
@@ -524,7 +524,7 @@ pub async fn establish_quic_connection(
         for root_cert_path in &cfg.pem_root_certs {
             match load_certificates_from_file(root_cert_path) {
                 Ok(certs) => {
-                    log::info!(
+                    log::debug!(
                         "QUIC: Loading additional root certificate from: {}",
                         root_cert_path.display()
                     );
@@ -568,8 +568,8 @@ pub async fn establish_quic_connection(
         if let Some(cert_path) = &cfg.pem_cert {
             if let Some(key_path) = &cfg.pem_private_key {
                 // Load certificate and key from files as PEM strings
-                log::info!("QUIC: Loading client certificate from file: {}", cert_path.display());
-                log::info!("QUIC: Loading client private key from file: {}", key_path.display());
+                log::debug!("QUIC: Loading client certificate from file: {}", cert_path.display());
+                log::debug!("QUIC: Loading client private key from file: {}", key_path.display());
 
                 match (
                     std::fs::read_to_string(cert_path),
@@ -661,7 +661,7 @@ pub async fn establish_quic_connection(
         .await
         .context("Failed to open QUIC stream")?;
 
-    log::info!("QUIC: Stream opened successfully");
+    log::debug!("QUIC: Stream opened successfully");
 
     let stream = Box::new(QuicStream::new(send, recv));
     Ok(stream)

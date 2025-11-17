@@ -114,16 +114,61 @@ pub fn spawn_tls_listener(tls_server: &TlsDomainServer) -> Result<(), Error> {
 
     let mut acceptor = SslAcceptor::mozilla_modern(SslMethod::tls())?;
 
-    let cert_file = tls_server
-        .pem_cert
-        .clone()
-        .unwrap_or_else(|| PKI.server_pem());
-    acceptor
-        .set_certificate_file(&cert_file, SslFiletype::PEM)
-        .context(format!(
-            "set_certificate_file to {} for TLS listener",
-            cert_file.display()
-        ))?;
+    // Handle certificate and key based on configuration or generate ephemeral cert
+    if let Some(cert_file) = &tls_server.pem_cert {
+        // Explicit certificate file provided
+        acceptor
+            .set_certificate_file(cert_file, SslFiletype::PEM)
+            .context(format!(
+                "set_certificate_file to {} for TLS listener",
+                cert_file.display()
+            ))?;
+
+        let key_file = tls_server
+            .pem_private_key
+            .clone()
+            .ok_or_else(|| anyhow!("pem_cert requires pem_private_key to be configured"))?;
+        acceptor
+            .set_private_key_file(&key_file, SslFiletype::PEM)
+            .context(format!(
+                "set_private_key_file to {} for TLS listener",
+                key_file.display()
+            ))?;
+    } else {
+        // Generate ephemeral server certificate like QUIC does
+        log::info!(
+            "TLS: Generating ephemeral server certificate for listener on {}",
+            tls_server.bind_address
+        );
+
+        let extra_san = if tls_server.extra_san.is_empty() {
+            None
+        } else {
+            log::info!("TLS: Adding extra SANs to certificate: {:?}", tls_server.extra_san);
+            Some(tls_server.extra_san.clone())
+        };
+
+        let cert_pem = PKI
+            .generate_server_cert(365, extra_san)
+            .context("Failed to generate server certificate")?;
+
+        // Write cert+key to temporary file for loading by OpenSSL
+        let temp_cert = std::env::temp_dir().join(format!(
+            "wezterm-tls-ephemeral-{}.pem",
+            std::process::id()
+        ));
+        std::fs::write(&temp_cert, &cert_pem)
+            .context("Failed to write ephemeral certificate to temp file")?;
+
+        acceptor
+            .set_certificate_file(&temp_cert, SslFiletype::PEM)
+            .context("Failed to set generated certificate from temp file")?;
+
+        // The PEM file contains both cert and private key, so we can use the same file
+        acceptor
+            .set_private_key_file(&temp_cert, SslFiletype::PEM)
+            .context("Failed to set generated private key from temp file")?;
+    }
 
     if let Some(chain_file) = tls_server.pem_ca.as_ref() {
         acceptor
@@ -133,17 +178,6 @@ pub fn spawn_tls_listener(tls_server: &TlsDomainServer) -> Result<(), Error> {
                 chain_file.display()
             ))?;
     }
-
-    let key_file = tls_server
-        .pem_private_key
-        .clone()
-        .unwrap_or_else(|| PKI.server_pem());
-    acceptor
-        .set_private_key_file(&key_file, SslFiletype::PEM)
-        .context(format!(
-            "set_private_key_file to {} for TLS listener",
-            key_file.display()
-        ))?;
 
     fn load_cert(name: &Path) -> anyhow::Result<X509> {
         let cert_bytes = std::fs::read(name)?;

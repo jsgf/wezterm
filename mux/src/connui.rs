@@ -50,6 +50,7 @@ pub enum UIRequest {
     Sleep {
         reason: String,
         duration: Duration,
+        defer_ms: Option<u64>,
         respond: Promise<()>,
     },
     Close,
@@ -89,9 +90,10 @@ impl ConnectionUIImpl {
                 Ok(UIRequest::Sleep {
                     reason,
                     duration,
+                    defer_ms,
                     mut respond,
                 }) => {
-                    respond.result(self.sleep(&reason, duration));
+                    respond.result(self.sleep(&reason, duration, defer_ms));
                 }
                 Err(err) if err.is_timeout() => {}
                 Err(err) => bail!("recv_timeout: {}", err),
@@ -123,9 +125,10 @@ impl ConnectionUIImpl {
         }
     }
 
-    fn sleep(&mut self, reason: &str, duration: Duration) -> anyhow::Result<()> {
+    fn sleep(&mut self, reason: &str, duration: Duration, defer_ms: Option<u64>) -> anyhow::Result<()> {
         let start = Instant::now();
         let deadline = start + duration;
+        let defer_until = defer_ms.map(|ms| start + Duration::from_millis(ms));
         let mut last_draw = None;
 
         loop {
@@ -134,50 +137,54 @@ impl ConnectionUIImpl {
                 break;
             }
 
-            // Render a progress bar underneath the countdown text by reversing
-            // out the text for the elapsed portion of time.
-            let remain = deadline - now;
-            let term_width = self.term.get_screen_size().map(|s| s.cols).unwrap_or(80);
-            let prog_width = term_width as u128 * (duration.as_millis() - remain.as_millis())
-                / duration.as_millis();
-            let prog_width = prog_width as usize;
-            let message = format!("{} ({:.0?})", reason, remain);
+            let show_progress = defer_until.is_none() || now >= defer_until.unwrap();
 
-            let mut reversed_string = String::new();
-            let mut default_string = String::new();
-            let mut col = 0;
-            for grapheme in Graphemes::new(&message) {
-                // Once we've passed the elapsed column, full up the string
-                // that we'll render with default attributes instead.
-                if col > prog_width {
-                    default_string.push_str(grapheme);
-                } else {
-                    reversed_string.push_str(grapheme);
+            if show_progress {
+                // Render a progress bar underneath the countdown text by reversing
+                // out the text for the elapsed portion of time.
+                let remain = deadline - now;
+                let term_width = self.term.get_screen_size().map(|s| s.cols).unwrap_or(80);
+                let prog_width = term_width as u128 * (duration.as_millis() - remain.as_millis())
+                    / duration.as_millis();
+                let prog_width = prog_width as usize;
+                let message = format!("{} ({:.0?})", reason, remain);
+
+                let mut reversed_string = String::new();
+                let mut default_string = String::new();
+                let mut col = 0;
+                for grapheme in Graphemes::new(&message) {
+                    // Once we've passed the elapsed column, full up the string
+                    // that we'll render with default attributes instead.
+                    if col > prog_width {
+                        default_string.push_str(grapheme);
+                    } else {
+                        reversed_string.push_str(grapheme);
+                    }
+                    col += 1;
                 }
-                col += 1;
-            }
 
-            // If we didn't reach the elapsed column yet (really short text!),
-            // we need to pad out the reversed string.
-            while col < prog_width {
-                reversed_string.push(' ');
-                col += 1;
-            }
+                // If we didn't reach the elapsed column yet (really short text!),
+                // we need to pad out the reversed string.
+                while col < prog_width {
+                    reversed_string.push(' ');
+                    col += 1;
+                }
 
-            let combined = format!("{}{}", reversed_string, default_string);
+                let combined = format!("{}{}", reversed_string, default_string);
 
-            if last_draw.is_none() || last_draw.as_ref().unwrap() != &combined {
-                self.term.render(&[
-                    Change::CursorPosition {
-                        x: Position::Absolute(0),
-                        y: Position::Relative(0),
-                    },
-                    Change::AllAttributes(CellAttributes::default().set_reverse(true).clone()),
-                    Change::Text(reversed_string),
-                    Change::AllAttributes(CellAttributes::default()),
-                    Change::Text(default_string),
-                ])?;
-                last_draw.replace(combined);
+                if last_draw.is_none() || last_draw.as_ref().unwrap() != &combined {
+                    self.term.render(&[
+                        Change::CursorPosition {
+                            x: Position::Absolute(0),
+                            y: Position::Relative(0),
+                        },
+                        Change::AllAttributes(CellAttributes::default().set_reverse(true).clone()),
+                        Change::Text(reversed_string),
+                        Change::AllAttributes(CellAttributes::default()),
+                        Change::Text(default_string),
+                    ])?;
+                    last_draw.replace(combined);
+                }
             }
 
             // We use poll_input rather than a raw sleep here so that
@@ -185,18 +192,22 @@ impl ConnectionUIImpl {
             // dimensions reported at the top of the loop.
             // We're using a sub-second value for the delay here for a
             // slightly smoother progress bar.
+            let remain = deadline - now;
             self.term
                 .poll_input(Some(remain.min(Duration::from_millis(50))))?;
         }
 
-        let message = format!("{} (done)\r\n", reason);
-        self.term.render(&[
-            Change::CursorPosition {
-                x: Position::Absolute(0),
-                y: Position::Relative(0),
-            },
-            Change::Text(message),
-        ])?;
+        // Only show "done" message if progress was shown
+        if defer_until.is_none() || start + duration >= defer_until.unwrap() {
+            let message = format!("{} (done)\r\n", reason);
+            self.term.render(&[
+                Change::CursorPosition {
+                    x: Position::Absolute(0),
+                    y: Position::Relative(0),
+                },
+                Change::Text(message),
+            ])?;
+        }
 
         Ok(())
     }
@@ -221,6 +232,7 @@ impl HeadlessImpl {
                     mut respond,
                     reason,
                     duration,
+                    defer_ms: _,
                 }) => {
                     log::error!("{} (sleeping for {:?})", reason, duration);
                     std::thread::sleep(duration);
@@ -268,6 +280,7 @@ impl ConnectionUI {
                     ui.sleep(
                         "(this window will close automatically)",
                         Duration::new(120, 0),
+                        None,
                     )
                     .ok();
                 }
@@ -340,6 +353,23 @@ impl ConnectionUI {
     /// Sleep (blocking!) for the specified duration, but updates
     /// the UI with the reason and a count down during that time.
     pub fn sleep_with_reason(&self, reason: &str, duration: Duration) -> anyhow::Result<()> {
+        self.sleep_impl(reason, duration, None)
+    }
+
+    /// Sleep (blocking!) for the specified duration, but defers showing the progress bar
+    /// until either the defer time has passed or the duration is complete.
+    /// This is useful for reconnects that might succeed quickly without needing UI feedback.
+    /// If defer_ms is None, defaults to 1000ms (1 second).
+    pub fn sleep_with_deferred_progress(
+        &self,
+        reason: &str,
+        duration: Duration,
+        defer_ms: Option<u64>,
+    ) -> anyhow::Result<()> {
+        self.sleep_impl(reason, duration, defer_ms.or(Some(1000)))
+    }
+
+    fn sleep_impl(&self, reason: &str, duration: Duration, defer_ms: Option<u64>) -> anyhow::Result<()> {
         let mut promise = Promise::new();
         let future = promise.get_future().unwrap();
 
@@ -347,6 +377,7 @@ impl ConnectionUI {
             .send(UIRequest::Sleep {
                 reason: reason.to_string(),
                 duration,
+                defer_ms,
                 respond: promise,
             })
             .context("send to ConnectionUI failed")?;
