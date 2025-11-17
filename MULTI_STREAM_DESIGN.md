@@ -552,18 +552,141 @@ fn unregister_stream(&mut self, stream_id: StreamId) {
 
 ---
 
+## Critical Design Issue: PDU Ordering and Stream Synchronization
+
+**Issue Discovered During Phase 1 Review**
+
+The initial design assumes that PDUs for the same pane can be routed to different streams without synchronization. However, **PDUs for a single pane have strict ordering requirements** that must be maintained:
+
+Example of order-dependent PDUs:
+- Multiple `WriteToPane` PDUs with user input must arrive in sequence
+- `ResizePane` followed by `GetLines` must maintain order
+- Any command followed by its result must preserve causality
+
+**The Problem:**
+
+If a pane's PDUs travel on different streams without synchronization, out-of-order delivery is possible:
+
+```
+Scenario: Client rebinds pane 42 from stream 0 to stream 1
+Time T1: Client sends WriteToPane(pane=42, "h") on stream 0
+Time T2: Client sends BindPaneToStream(pane=42) on stream 1
+Time T3: Client sends WriteToPane(pane=42, "e") on stream 1
+
+Server receives (QUIC streams are independent):
+         BindPaneToStream(42) on stream 1 → updates map: pane 42 → stream 1
+         WriteToPane(pane=42, "e") on stream 1 → routed to bound stream ✓
+         WriteToPane(pane=42, "h") on stream 0 → arrives LATE ✗ out of order!
+```
+
+**Root Cause:**
+
+PDUs on stream 0 and stream 1 have no ordering guarantee relative to each other. The `BindPaneToStream` PDU arriving on stream 1 doesn't synchronize with in-flight PDUs on stream 0.
+
+### Proposed Solutions
+
+#### Option 1: Client-Initiated Synchronization
+Client is responsible for flushing all outstanding PDUs on old stream before rebinding:
+
+```
+Client: (issue all current commands on stream 0)
+Client: WAITS for all responses/acks to complete
+Client: sends BindPaneToStream(pane=42) on stream 1
+Client: (can now pipeline on stream 1)
+```
+
+**Pros:** Simple, no protocol changes needed
+**Cons:** Client must track in-flight PDUs, adds latency
+
+#### Option 2: Server-Acknowledged Binding
+Server ACKs the bind only after draining old stream:
+
+```
+Client: sends BindPaneToStream(pane=42) on stream 1 (immediately)
+Server: receives bind on stream 1
+Server: WAITS for stream 0 to drain (all pending pane 42 PDUs processed)
+Server: sends BindPaneToStreamResponse (ACK)
+Client: receives ACK, now safe to send on stream 1
+```
+
+**Pros:** Client can send bind early, no need to track in-flight PDUs
+**Cons:** Adds new response PDU type, server must synchronize across streams
+
+#### Option 3: Implicit Bind on First Request
+Don't rebind mid-session. Instead:
+
+```
+On new pane creation:
+  Client: creates stream N
+  Client: sends SpawnV2 on stream N (implicit bind via initial request)
+  Server: routes all future pane N PDUs to stream N
+
+On reconnection:
+  Client: sends ListPanes
+  Client: receives pane list, creates streams for each
+  Client: sends BindPaneToStream for each pane
+  Server: doesn't send updates until binds received
+  Client: (no rebinding after initial setup)
+```
+
+**Pros:** No mid-session rebinding complexity, clear protocol
+**Cons:** Can't dynamically move panes between streams, less optimization
+
+#### Option 4: Add Flow Control PDUs
+Introduce `PausePane` / `ResumePane` PDUs:
+
+```
+Client: sends PausePane(pane=42) on stream 0
+Server: stops sending updates for pane 42
+Client: receives confirmation (no more updates arriving)
+Client: sends BindPaneToStream(pane=42) on stream 1
+Client: sends ResumePane(pane=42) on stream 1
+Server: starts sending updates on stream 1
+```
+
+**Pros:** Clean, explicit synchronization
+**Cons:** Adds complexity, requires new PDU types, adds latency
+
+### Current Protocol Limitations
+
+**No existing pane pause mechanism:**
+- Codec has no `PausePane` / `ResumePane` PDU types
+- `Pane` trait has no pause/resume methods
+- Tmux-specific pause/continue events exist but aren't integrated into general protocol
+- No mux-level flow control mechanism
+
+This means **Option 4 would require adding new PDU types** to the codec.
+
+### Recommendation for Phase 2
+
+**Proceed with Option 3 (Implicit Bind on First Request):**
+
+1. Keep Phase 1 (Protocol foundation) as-is
+2. In Phase 2, implement server-side stream routing but with restriction: **no dynamic rebinding**
+3. Add protocol rule: bind a pane to a stream when it's created (implicit via first request PDU), not later
+4. Document that reconnection creates streams upfront before resuming normal operation
+5. Phase 4+ can revisit dynamic rebinding if needed
+
+This defers the synchronization complexity while establishing the infrastructure correctly.
+
+**Implementation impact:**
+- Clients must ensure `BindPaneToStream` is sent before any pane-specific PDU
+- Servers trust clients to have synchronized
+- No new response PDU types needed
+- Simpler to reason about correctness
+
+---
+
 ## Open Questions & Future Work
 
-### 1. Pane Rebinding Heuristics
+### 1. Dynamic Pane Rebinding (Phase 4+)
 
-**Question:** When to automatically create new streams on reconnect?
+**Future:** Once protocol synchronization is solved, consider dynamic rebinding:
+- Option 1: Client-initiated flush-and-bind
+- Option 2: Server-acknowledged binding with ACK
+- Option 4: Flow control PDUs (PausePane/ResumePane)
 
-**Options:**
-- All panes get streams (simple, wastes resources)
-- Active panes only (requires activity tracking)
-- Manual via UI (flexible, requires UX design)
-
-**Recommendation:** Start with "on-demand" - create stream when pane becomes active
+**Currently (Phase 2):** No dynamic rebinding. Bind once at creation.
 
 ### 2. Stream Limit Handling
 
@@ -760,7 +883,7 @@ Stream IDs are implicit in the transport layer and never appear in the wire prot
 
 ## Conclusion
 
-Multi-stream QUIC is **feasible and recommended** for wezterm mux:
+Multi-stream QUIC is **feasible and recommended** for wezterm mux, **with an important restriction**:
 
 ✅ Protocol supports out-of-order delivery (serial numbers are just pairing)
 
@@ -774,8 +897,14 @@ Multi-stream QUIC is **feasible and recommended** for wezterm mux:
 
 ✅ Automatic cleanup via Quinn connection/stream lifecycle
 
-**Risk:** Moderate implementation complexity
+**Critical Finding:** PDUs for the same pane have strict ordering requirements. Mid-session dynamic rebinding requires synchronization that's complex to implement correctly.
 
-**Benefit:** Eliminates head-of-line blocking for interactive panes
+**Revised Recommendation:**
 
-**Recommendation:** Proceed with phased implementation starting with protocol support.
+**Phase 1-3:** Implement stream binding at pane creation only (implicit via first request PDU). No dynamic rebinding mid-session.
+
+**Phase 4+:** Revisit dynamic rebinding once a synchronization protocol is chosen (recommend Option 3: implicit bind via first request, no rebinding).
+
+**Benefit:** Eliminates head-of-line blocking for interactive panes, with simpler, safer synchronization guarantees.
+
+**Risk:** Moderate implementation complexity, deferred dynamic optimization
