@@ -180,14 +180,22 @@ pub fn spawn_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
 async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()> {
     let listen_addr: std::net::SocketAddr = quic_server.bind_address.parse()?;
 
-    // Initialize PKI to get the server certificate (kept in-memory)
-    // Note: Quiccreds will generate its own client certificate,
-    // but that's OK since we skip client cert verification with with_no_client_auth()
-    log::info!("QUIC: Initializing PKI for server certificate");
+    log::debug!(
+        "QUIC: Generating server certificate with {} day lifetime",
+        quic_server.certificate_lifetime_days
+    );
 
     let pki = &wezterm_mux_server_impl::PKI;
-    let cert_data = pki.server_pem_string().to_string();
-    // CA not needed since we use with_no_client_auth() on the server
+    let extra_san = if quic_server.extra_san.is_empty() {
+        None
+    } else {
+        log::debug!("QUIC: Adding extra SANs to certificate: {:?}", quic_server.extra_san);
+        Some(quic_server.extra_san.clone())
+    };
+
+    let cert_data = pki
+        .generate_server_cert(quic_server.certificate_lifetime_days, extra_san)
+        .context("Failed to generate server certificate")?;
 
     // Parse PEM into rustls format
     let cert_chain: Vec<rustls::pki_types::CertificateDer> =
@@ -195,40 +203,8 @@ async fn run_quic_listener(quic_server: &QuicDomainServer) -> anyhow::Result<()>
             .collect::<Result<Vec<_>, _>>()
             .context("parsing server certificate")?;
 
-    // Extract private key by reading all PEM items and finding the key
-    let mut key_reader = std::io::Cursor::new(&cert_data);
-    let mut server_key: Option<rustls::pki_types::PrivateKeyDer> = None;
-
-    loop {
-        match rustls_pemfile::read_one(&mut key_reader) {
-            Ok(Some(item)) => {
-                match item {
-                    rustls_pemfile::Item::Pkcs8Key(key) => {
-                        server_key = Some(rustls::pki_types::PrivateKeyDer::Pkcs8(key));
-                        break;
-                    }
-                    rustls_pemfile::Item::Sec1Key(key) => {
-                        server_key = Some(rustls::pki_types::PrivateKeyDer::Sec1(key));
-                        break;
-                    }
-                    rustls_pemfile::Item::X509Certificate(_) => {
-                        // Skip certificates, we already have them
-                        continue;
-                    }
-                    _ => {
-                        // Skip other items
-                        continue;
-                    }
-                }
-            }
-            Ok(None) => break,
-            Err(e) => {
-                anyhow::bail!("Failed to read private key from PEM: {}", e);
-            }
-        }
-    }
-
-    let server_key = server_key.ok_or_else(|| anyhow!("no private key found in PEM"))?;
+    // Extract private key from PEM
+    let server_key = wezterm_mux_server_impl::pki::extract_private_key_from_bytes(cert_data.as_bytes())?;
 
     // NOTE: For testing, we skip client certificate verification.
     // The connection is already authenticated via SSH bootstrap, so we don't need

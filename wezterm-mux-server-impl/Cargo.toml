@@ -8,7 +8,7 @@ publish = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-quic = ["config/quic", "wezterm-client/quic"]
+quic = ["config/quic", "wezterm-client/quic", "rustls-pemfile", "quinn"]
 
 [dependencies]
 anyhow.workspace = true
@@ -27,6 +27,7 @@ portable-pty = { workspace=true, features = ["serde_support"]}
 promise.workspace = true
 rangeset.workspace = true
 rcgen.workspace = true
+rustls-pemfile = { version = "2", optional = true }
 smol.workspace = true
 termwiz = { workspace=true, features=["use_serde"] }
 time.workspace = true
