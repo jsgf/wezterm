@@ -1,0 +1,7 @@
+- Fix rustls server and client config
+  - implement accept_invalid_hostnames and expected_cn
+  - actually implement all options present in config
+- add option for additional server names
+- more branch cleanup
+- 0rtt never seems to work
+  - does it need to be enabled on server?

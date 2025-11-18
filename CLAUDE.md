@@ -1,0 +1,2 @@
+- wezterm uses WEZTERM_LOG to control log levels and filtering
+- All changes must be validated with `cargo check`, with all relevant feature combinations
