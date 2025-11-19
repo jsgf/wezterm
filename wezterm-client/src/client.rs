@@ -505,7 +505,7 @@ async fn client_thread_async(
         map: HashMap::new(),
     };
 
-    let mut stream = reconnectable.take_stream().unwrap();
+    let mut stream = StreamPeek::new(reconnectable.take_stream().unwrap());
 
     let mut renewal_check_timer = Box::pin(create_renewal_check_timer().fuse());
 
@@ -533,8 +533,9 @@ async fn client_thread_async(
                 }
             }
             // Handle incoming PDUs from the server
-            pdu = Pdu::decode_async(&mut stream, Some(next_serial)).fuse() => {
-                match pdu {
+            _ = stream.peek().fuse() => {
+                // Stream has data available, decode atomically
+                match Pdu::decode_async(&mut stream, Some(next_serial)).await {
                     Ok(decoded) => {
                         log::debug!(
                             "decoded serial {} {}",
