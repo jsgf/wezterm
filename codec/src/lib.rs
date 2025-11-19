@@ -1142,6 +1142,101 @@ pub struct GetImageCellResponse {
     pub data: Option<Arc<ImageData>>,
 }
 
+/// Wrapper that allows peeking at the next byte without consuming it from the stream.
+/// This solves cancel-safety issues with futures::select! and PDU decoding:
+/// - Avoids creating decode futures that get cancelled mid-read (corrupting the stream)
+/// - For QUIC: avoids deadlocks where readable() fires on protocol traffic but no user data
+/// - peek() blocks until actual user data is available, then decode runs atomically
+#[derive(Debug)]
+pub struct StreamPeek<S> {
+    inner: S,
+    peeked: Option<u8>,
+}
+
+impl<S> StreamPeek<S>
+where
+    S: AsyncRead + Unpin,
+{
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            peeked: None,
+        }
+    }
+
+    /// Peek at the next byte, blocking until available
+    /// If already peeked, returns the cached byte
+    pub async fn peek(&mut self) -> std::io::Result<u8> {
+        if let Some(b) = self.peeked {
+            return Ok(b);
+        }
+
+        let mut buf = [0u8; 1];
+        let n = self.inner.read(&mut buf).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "EOF while peeking",
+            ));
+        }
+        self.peeked = Some(buf[0]);
+        Ok(buf[0])
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for StreamPeek<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if buf.is_empty() {
+            return std::task::Poll::Ready(Ok(0));
+        }
+
+        // If we have a peeked byte, return it first
+        if let Some(b) = self.peeked.take() {
+            buf[0] = b;
+            if buf.len() == 1 {
+                return std::task::Poll::Ready(Ok(1));
+            }
+            // Try to read additional bytes from inner stream
+            match std::pin::Pin::new(&mut self.inner).poll_read(cx, &mut buf[1..]) {
+                std::task::Poll::Ready(Ok(n)) => std::task::Poll::Ready(Ok(n + 1)),
+                std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Pending => std::task::Poll::Ready(Ok(1)), // Return the peeked byte at least
+            }
+        } else {
+            // No peeked byte, just forward to inner
+            std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for StreamPeek<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_close(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_close(cx)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
