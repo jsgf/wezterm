@@ -2,7 +2,7 @@
 // Handles QUIC endpoint setup and connection acceptance
 
 use anyhow::Context;
-use codec::{DecodedPdu, Pdu};
+use codec::{DecodedPdu, Pdu, StreamPeek};
 use config::QuicDomainServer;
 use futures::FutureExt;
 use mux::{Mux, MuxNotification};
@@ -99,11 +99,13 @@ enum Item {
 
 /// Process a QUIC stream for mux protocol
 /// Uses futures::select! for fair concurrent handling of responses and requests
-pub async fn process_quic_stream(mut stream: QuicStream) -> anyhow::Result<()> {
+pub async fn process_quic_stream(stream: QuicStream) -> anyhow::Result<()> {
     use smol::channel::unbounded;
     use wezterm_mux_server_impl::sessionhandler::{PduSender, SessionHandler};
 
     log::debug!("QUIC: process_quic_stream starting");
+
+    let mut stream = StreamPeek::new(stream);
 
     let (item_tx, item_rx) = unbounded::<Item>();
 
@@ -146,8 +148,9 @@ pub async fn process_quic_stream(mut stream: QuicStream) -> anyhow::Result<()> {
                     }
                 }
             }
-            request = Pdu::decode_async(&mut stream, None).fuse() => {
-                match request {
+            _ = stream.peek().fuse() => {
+                // Stream has data available, decode atomically
+                match Pdu::decode_async(&mut stream, None).await {
                     Ok(request_pdu) => {
                         log::trace!("QUIC: received PDU from stream: {:?}", request_pdu);
                         handler.process_one(request_pdu);
