@@ -468,7 +468,6 @@ pub async fn establish_quic_connection(
         .ok_or_else(|| anyhow!("No addresses found for {}", remote_address))?;
 
     // Extract configuration options
-    let enable_0rtt = config.map(|c| c.enable_0rtt).unwrap_or(true);
     let enable_migration = config.map(|c| c.enable_migration).unwrap_or(true);
     let accept_invalid_hostnames = config.map(|c| c.accept_invalid_hostnames).unwrap_or(false);
     let expected_cn = config.and_then(|c| c.expected_cn.clone());
@@ -630,29 +629,9 @@ pub async fn establish_quic_connection(
         .connect(socket_addr, verify_hostname)
         .context("Failed to create QUIC connection")?;
 
-    // Try to use 0-RTT if enabled for faster reconnections
-    let connection = if enable_0rtt {
-        log::info!("QUIC: Attempting 0-RTT connection");
-        match connecting.into_0rtt() {
-            Ok((conn, zero_rtt_accepted)) => {
-                log::info!("QUIC: 0-RTT connection established, waiting for acceptance");
-                // We can use the connection immediately, but wait for confirmation
-                // that 0-RTT was accepted to avoid issues with rejected 0-RTT data
-                let _ = zero_rtt_accepted.await;
-                log::info!("QUIC: 0-RTT accepted");
-                conn
-            }
-            Err(connecting) => {
-                // 0-RTT not available or disabled, fall back to full handshake
-                log::info!("QUIC: 0-RTT not available, falling back to 1-RTT handshake");
-                connecting.await.context("QUIC handshake failed")?
-            }
-        }
-    } else {
-        // 0-RTT disabled, do regular handshake
-        log::info!("QUIC: 0-RTT disabled, performing 1-RTT handshake");
-        connecting.await.context("QUIC handshake failed")?
-    };
+    // Do a standard 1-RTT handshake
+    log::debug!("QUIC: Performing 1-RTT handshake");
+    let connection = connecting.await.context("QUIC handshake failed")?;
 
     log::info!("QUIC: Connection established, opening bidirectional stream");
     // Open a bidirectional stream for mux protocol
