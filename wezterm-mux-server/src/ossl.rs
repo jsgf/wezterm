@@ -198,7 +198,7 @@ pub fn spawn_tls_listener(tls_server: &TlsDomainServer) -> Result<(), Error> {
 
     acceptor
         .cert_store_mut()
-        .add_cert(load_cert(&PKI.ca_pem())?)?;
+        .add_cert(X509::from_pem(PKI.ca_pem_string_cached().as_bytes())?)?;
 
     acceptor.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
 
